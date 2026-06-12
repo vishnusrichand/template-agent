@@ -21,10 +21,13 @@ Optional env vars:
     SSO_JWT_AUDIENCE: Expected JWT audience (defaults to SSO_CLIENT_ID)
     ENABLE_USER_ID_ENCRYPTION: Encrypt user IDs in logs/traces (default: false)
     USER_ID_ENCRYPTION_KEY: 32-byte hex key for user ID encryption
+    THREAD_SCOPE_METADATA: Optional JSON merged into thread metadata on create
+        and used as an additional filter on threads/search (OSS: unset)
 """
 
 import hashlib
 import hmac
+import json
 import os
 from typing import Any
 
@@ -128,6 +131,65 @@ def _decode_token(token: str) -> dict[str, Any]:
 
     result: dict[str, Any] = jwt.decode(token, signing_key.key, **kwargs)
     return result
+
+
+def _thread_scope_metadata() -> dict[str, Any]:
+    """Parse optional deployment scope JSON from THREAD_SCOPE_METADATA."""
+    raw = os.environ.get("THREAD_SCOPE_METADATA", "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("thread_scope_metadata_invalid_json")
+        return {}
+    if not isinstance(parsed, dict):
+        logger.warning("thread_scope_metadata_not_object")
+        return {}
+    return parsed
+
+
+def _merge_scope_into_value(value: dict[str, Any]) -> dict[str, Any]:
+    """Merge scope into request value metadata; return Aegra filter shape."""
+    scope = _thread_scope_metadata()
+    if not scope:
+        return {}
+    metadata = value.setdefault("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+        value["metadata"] = metadata
+    metadata.update(scope)
+    return {"metadata": scope}
+
+
+@auth.on.threads.create
+async def on_thread_create(
+    ctx: Any,
+    value: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge THREAD_SCOPE_METADATA into new thread metadata."""
+    return _merge_scope_into_value(value)
+
+
+@auth.on.threads.update
+async def on_thread_update(
+    ctx: Any,
+    value: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge THREAD_SCOPE_METADATA into thread metadata updates."""
+    return _merge_scope_into_value(value)
+
+
+@auth.on.threads.search
+async def on_thread_search(
+    ctx: Any,
+    value: dict[str, Any],
+) -> dict[str, Any]:
+    """Restrict thread search to THREAD_SCOPE_METADATA when configured."""
+    scope = _thread_scope_metadata()
+    if not scope:
+        return {}
+    return {"metadata": scope}
 
 
 def _build_dev_user() -> dict[str, Any]:

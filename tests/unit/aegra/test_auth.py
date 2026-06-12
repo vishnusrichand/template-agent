@@ -8,7 +8,11 @@ import pytest
 from deep_agent.aegra.auth import (
     _build_dev_user,
     _resolve_jwks_uri,
+    _thread_scope_metadata,
     encrypt_user_id,
+    on_thread_create,
+    on_thread_search,
+    on_thread_update,
 )
 
 
@@ -60,6 +64,87 @@ class TestBuildDevUser:
         with patch("deep_agent.aegra.auth.DEV_USER_ID", "custom-dev"):
             user = _build_dev_user()
             assert user["identity"] == "custom-dev"
+
+
+class TestThreadScopeMetadata:
+    def test_empty_when_unset(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("THREAD_SCOPE_METADATA", None)
+            assert _thread_scope_metadata() == {}
+
+    def test_empty_when_blank(self):
+        with patch.dict(os.environ, {"THREAD_SCOPE_METADATA": "   "}):
+            assert _thread_scope_metadata() == {}
+
+    def test_parses_json_object(self):
+        with patch.dict(
+            os.environ,
+            {"THREAD_SCOPE_METADATA": '{"deployment_id":"org/agent"}'},
+        ):
+            assert _thread_scope_metadata() == {"deployment_id": "org/agent"}
+
+    def test_invalid_json_returns_empty(self):
+        with patch.dict(os.environ, {"THREAD_SCOPE_METADATA": "not-json"}):
+            assert _thread_scope_metadata() == {}
+
+    def test_non_object_json_returns_empty(self):
+        with patch.dict(os.environ, {"THREAD_SCOPE_METADATA": '["a"]'}):
+            assert _thread_scope_metadata() == {}
+
+
+class TestThreadAuthHandlers:
+    @pytest.mark.asyncio
+    async def test_create_merges_scope_into_metadata(self):
+        with patch.dict(
+            os.environ,
+            {"THREAD_SCOPE_METADATA": '{"deployment_id":"org/agent"}'},
+        ):
+            value = {"metadata": {"user_identity": "user-1"}}
+            result = await on_thread_create(MagicMock(), value)
+            assert result == {"metadata": {"deployment_id": "org/agent"}}
+            assert value["metadata"] == {
+                "user_identity": "user-1",
+                "deployment_id": "org/agent",
+            }
+
+    @pytest.mark.asyncio
+    async def test_create_noop_when_unset(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("THREAD_SCOPE_METADATA", None)
+            value = {"metadata": {"user_identity": "user-1"}}
+            result = await on_thread_create(MagicMock(), value)
+            assert result == {}
+            assert value["metadata"] == {"user_identity": "user-1"}
+
+    @pytest.mark.asyncio
+    async def test_update_merges_scope_into_metadata(self):
+        with patch.dict(
+            os.environ,
+            {"THREAD_SCOPE_METADATA": '{"deployment_id":"org/agent"}'},
+        ):
+            value = {"metadata": {"thread_name": "hello"}}
+            result = await on_thread_update(MagicMock(), value)
+            assert result == {"metadata": {"deployment_id": "org/agent"}}
+            assert value["metadata"] == {
+                "thread_name": "hello",
+                "deployment_id": "org/agent",
+            }
+
+    @pytest.mark.asyncio
+    async def test_search_returns_scope_filter(self):
+        with patch.dict(
+            os.environ,
+            {"THREAD_SCOPE_METADATA": '{"deployment_id":"org/agent"}'},
+        ):
+            result = await on_thread_search(MagicMock(), {})
+            assert result == {"metadata": {"deployment_id": "org/agent"}}
+
+    @pytest.mark.asyncio
+    async def test_search_empty_when_unset(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("THREAD_SCOPE_METADATA", None)
+            result = await on_thread_search(MagicMock(), {})
+            assert result == {}
 
 
 class TestResolveJwksUri:
