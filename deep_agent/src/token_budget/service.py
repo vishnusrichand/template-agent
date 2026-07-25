@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from deep_agent.src.agent.config import agent_config
 from deep_agent.src.settings import settings
+from deep_agent.src.token_budget.postgres_repository import TokenUsagePostgresRepository
 from deep_agent.utils.pylogger import get_python_logger
-
-if TYPE_CHECKING:
-    from deep_agent.src.token_budget.mongo_repository import TokenUsageMongoRepository
 
 logger = get_python_logger()
 
@@ -153,31 +151,18 @@ def extract_tokens_from_message(message: Any) -> tuple[int, int]:
     return 0, 0
 
 
-_mongo_repo_instance: TokenUsageMongoRepository | None = None
-_mongo_repo_lock = threading.Lock()
+_pg_repo_instance: TokenUsagePostgresRepository | None = None
+_pg_repo_lock = threading.Lock()
 
 
-def _mongo_repo() -> TokenUsageMongoRepository:
-    """Return a process-wide Mongo repository (reuses the Motor client pool)."""
-    global _mongo_repo_instance  # noqa: PLW0603
-
-    if _mongo_repo_instance is None:
-        with _mongo_repo_lock:
-            if _mongo_repo_instance is None:
-                from deep_agent.src.token_budget.mongo_repository import (
-                    TokenUsageMongoRepository,
-                )
-
-                uri = settings.MONGODB_URI
-                if not uri:
-                    raise TokenUsageUnavailableError(
-                        "token budget tracking is not configured"
-                    )
-                _mongo_repo_instance = TokenUsageMongoRepository(
-                    uri,
-                    db_name=settings.MONGODB_DB,
-                )
-    return _mongo_repo_instance
+def _pg_repo() -> TokenUsagePostgresRepository:
+    """Return a process-wide Postgres repository (singleton)."""
+    global _pg_repo_instance  # noqa: PLW0603
+    if _pg_repo_instance is None:
+        with _pg_repo_lock:
+            if _pg_repo_instance is None:
+                _pg_repo_instance = TokenUsagePostgresRepository(settings.database_uri)
+    return _pg_repo_instance
 
 
 _MAX_REASONABLE_TOKENS = 1_000_000
@@ -189,16 +174,14 @@ async def check_and_record(
     output_tokens: int,
     *,
     user_id: str | None = None,
+    org_id: str | None = None,
     trace_id: str | None = None,
 ) -> None:
-    """Increment thread usage, roll up daily user totals, and emit OTEL when enabled."""
+    """Increment thread usage, roll up daily user totals, and emit OTEL."""
     config = agent_config.get_token_budget_config()
     if not config.is_active:
         return
     if not thread_id or thread_id == "unknown":
-        return
-    if not settings.MONGODB_URI:
-        logger.debug("token_budget_skipped_no_mongodb_uri")
         return
     if input_tokens <= 0 and output_tokens <= 0:
         return
@@ -211,8 +194,11 @@ async def check_and_record(
         return
 
     try:
-        repo = _mongo_repo()
-        agent_name = agent_config.get_name()
+        repo = _pg_repo()
+        # Priority: deployed setting → yaml config name
+        agent_name = settings.DEPLOYED_AGENT_NAME or agent_config.get_name()
+        # Priority: deployed setting → caller-supplied (from request metadata) → fallback
+        effective_org_id = settings.DEPLOYED_AGENT_ORG or org_id or "default"
         row = await repo.increment_usage(
             thread_id,
             input_tokens,
@@ -222,12 +208,14 @@ async def check_and_record(
         total_delta = input_tokens + output_tokens
         daily_row = None
         if user_id and user_id != "unknown" and total_delta > 0:
-            daily_row = await repo.increment_daily_usage(user_id, total_delta)
+            daily_row = await repo.increment_agent_daily_usage(
+                user_id,
+                total_delta,
+                org_id=effective_org_id,
+                agent_name=agent_name,
+            )
     except Exception:
-        logger.warning(
-            "token_budget_mongo_write_failed",
-            exc_info=True,
-        )
+        logger.warning("token_budget_postgres_write_failed", exc_info=True)
         return
 
     from deep_agent.src.token_budget.otel_emit import (
@@ -250,6 +238,8 @@ async def check_and_record(
     if daily_row is not None:
         emit_daily_token_usage(
             user_id=str(daily_row["user_id"]),
+            org_id=str(daily_row["org_id"]),
+            agent_name=str(daily_row["agent_name"]),
             total_tokens=int(daily_row["total_tokens"]),
             date=str(daily_row["date"]),
             timestamp=daily_row.get("updated_at"),
@@ -259,17 +249,14 @@ async def check_and_record(
 async def get_thread_token_usage(thread_id: str) -> ThreadTokenUsage:
     """Return cumulative token usage for a thread."""
     config = agent_config.get_token_budget_config()
-    if not config.is_active or not settings.MONGODB_URI:
+    if not config.is_active:
         raise TokenUsageUnavailableError("token budget tracking is not configured")
 
     try:
-        repo = _mongo_repo()
+        repo = _pg_repo()
         row = await repo.get_thread_usage(thread_id)
     except Exception as exc:
-        logger.warning(
-            "token_budget_mongo_read_failed",
-            exc_info=True,
-        )
+        logger.warning("token_budget_postgres_read_failed", exc_info=True)
         raise TokenUsageUnavailableError("token usage storage unavailable") from exc
 
     if row is None:

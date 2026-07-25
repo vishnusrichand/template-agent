@@ -11,7 +11,7 @@ from deep_agent.src.token_budget.config import TokenBudgetConfig
 from deep_agent.src.token_budget.service import (
     TokenUsageNotFoundError,
     TokenUsageUnavailableError,
-    _mongo_repo,
+    _pg_repo,
     check_and_record,
     extract_tokens_from_message,
     get_thread_token_usage,
@@ -61,7 +61,7 @@ def test_extract_tokens_from_message_zero_input_without_total_uses_output() -> N
 
 
 @pytest.mark.asyncio
-async def test_check_and_record_increments_mongo_and_daily_usage() -> None:
+async def test_check_and_record_increments_postgres_and_daily_usage() -> None:
     config = TokenBudgetConfig(enabled=True)
     row = {
         "total_tokens": 150,
@@ -71,16 +71,19 @@ async def test_check_and_record_increments_mongo_and_daily_usage() -> None:
 
     mock_repo = AsyncMock()
     mock_repo.increment_usage.return_value = row
-    mock_repo.increment_daily_usage.return_value = {
+    mock_repo.increment_agent_daily_usage.return_value = {
         "user_id": "user-1",
+        "org_id": "default",
+        "agent_name": "health-assistant",
         "total_tokens": 150,
         "date": "2026-06-23",
         "updated_at": datetime(2026, 6, 23, 12, 0, tzinfo=UTC),
     }
 
     mock_settings = MagicMock()
-    mock_settings.MONGODB_URI = "mongodb://mongodb:27017"
-    mock_settings.MONGODB_DB = "tokenusage"
+    mock_settings.DEPLOYED_AGENT_NAME = ""
+    mock_settings.DEPLOYED_AGENT_ORG = ""
+    mock_settings.database_uri = "postgresql://postgres:postgres@localhost:5432/test"
 
     with (
         patch(
@@ -93,7 +96,7 @@ async def test_check_and_record_increments_mongo_and_daily_usage() -> None:
         ),
         patch("deep_agent.src.token_budget.service.settings", mock_settings),
         patch(
-            "deep_agent.src.token_budget.service._mongo_repo",
+            "deep_agent.src.token_budget.service._pg_repo",
             return_value=mock_repo,
         ),
         patch("deep_agent.src.token_budget.otel_emit.emit_token_usage") as emit_usage,
@@ -109,7 +112,12 @@ async def test_check_and_record_increments_mongo_and_daily_usage() -> None:
         50,
         agent_name="health-assistant",
     )
-    mock_repo.increment_daily_usage.assert_awaited_once_with("user-1", 150)
+    mock_repo.increment_agent_daily_usage.assert_awaited_once_with(
+        "user-1",
+        150,
+        org_id="default",
+        agent_name="health-assistant",
+    )
     emit_usage.assert_called_once_with(
         thread_id="thread-1",
         user_id="user-1",
@@ -123,6 +131,8 @@ async def test_check_and_record_increments_mongo_and_daily_usage() -> None:
     )
     emit_daily.assert_called_once_with(
         user_id="user-1",
+        org_id="default",
+        agent_name="health-assistant",
         total_tokens=150,
         date="2026-06-23",
         timestamp=ANY,
@@ -142,8 +152,9 @@ async def test_check_and_record_skips_daily_without_user_id() -> None:
     mock_repo.increment_usage.return_value = row
 
     mock_settings = MagicMock()
-    mock_settings.MONGODB_URI = "mongodb://mongodb:27017"
-    mock_settings.MONGODB_DB = "tokenusage"
+    mock_settings.DEPLOYED_AGENT_NAME = ""
+    mock_settings.DEPLOYED_AGENT_ORG = ""
+    mock_settings.database_uri = "postgresql://postgres:postgres@localhost:5432/test"
 
     with (
         patch(
@@ -156,7 +167,7 @@ async def test_check_and_record_skips_daily_without_user_id() -> None:
         ),
         patch("deep_agent.src.token_budget.service.settings", mock_settings),
         patch(
-            "deep_agent.src.token_budget.service._mongo_repo",
+            "deep_agent.src.token_budget.service._pg_repo",
             return_value=mock_repo,
         ),
         patch("deep_agent.src.token_budget.otel_emit.emit_token_usage"),
@@ -164,39 +175,36 @@ async def test_check_and_record_skips_daily_without_user_id() -> None:
     ):
         await check_and_record("thread-1", 100, 50)
 
-    mock_repo.increment_daily_usage.assert_not_awaited()
+    mock_repo.increment_agent_daily_usage.assert_not_awaited()
 
 
-def test_mongo_repo_returns_singleton() -> None:
+def test_pg_repo_returns_singleton() -> None:
     import deep_agent.src.token_budget.service as service_module
 
-    service_module._mongo_repo_instance = None
+    service_module._pg_repo_instance = None
     mock_settings = MagicMock()
-    mock_settings.MONGODB_URI = "mongodb://mongodb:27017"
-    mock_settings.MONGODB_DB = "tokenusage"
+    mock_settings.database_uri = "postgresql://postgres:postgres@localhost:5432/test"
 
     with (
         patch("deep_agent.src.token_budget.service.settings", mock_settings),
         patch(
-            "deep_agent.src.token_budget.mongo_repository.TokenUsageMongoRepository",
+            "deep_agent.src.token_budget.service.TokenUsagePostgresRepository",
         ) as repo_cls,
     ):
-        first = _mongo_repo()
-        second = _mongo_repo()
+        first = _pg_repo()
+        second = _pg_repo()
 
     assert first is second
     repo_cls.assert_called_once_with(
-        "mongodb://mongodb:27017",
-        db_name="tokenusage",
+        "postgresql://postgres:postgres@localhost:5432/test",
     )
-    service_module._mongo_repo_instance = None
+    service_module._pg_repo_instance = None
 
 
 @pytest.mark.asyncio
 async def test_get_thread_token_usage_raises_when_not_configured() -> None:
     config = TokenBudgetConfig(enabled=False)
     mock_settings = MagicMock()
-    mock_settings.MONGODB_URI = ""
 
     with (
         patch(
@@ -215,7 +223,7 @@ async def test_get_thread_token_usage_raises_when_thread_missing() -> None:
     mock_repo = AsyncMock()
     mock_repo.get_thread_usage.return_value = None
     mock_settings = MagicMock()
-    mock_settings.MONGODB_URI = "mongodb://mongodb:27017"
+    mock_settings.database_uri = "postgresql://postgres:postgres@localhost:5432/test"
 
     with (
         patch(
@@ -224,7 +232,7 @@ async def test_get_thread_token_usage_raises_when_thread_missing() -> None:
         ),
         patch("deep_agent.src.token_budget.service.settings", mock_settings),
         patch(
-            "deep_agent.src.token_budget.service._mongo_repo",
+            "deep_agent.src.token_budget.service._pg_repo",
             return_value=mock_repo,
         ),
     ):

@@ -122,6 +122,7 @@ class TokenBudgetCallbackHandler(AsyncCallbackHandler):
                 input_tokens,
                 output_tokens,
                 user_id=user_id,
+                org_id=org_id,
                 trace_id=trace_id,
             )
             _on_tracking_success()
