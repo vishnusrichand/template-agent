@@ -1,4 +1,4 @@
-"""PostgreSQL store for per-thread and per-user daily token usage."""
+"""PostgreSQL store for per-thread and per-agent daily token usage."""
 from __future__ import annotations
 
 import re
@@ -13,6 +13,7 @@ from deep_agent.utils.pylogger import get_python_logger
 logger = get_python_logger()
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_TABLES_ENSURED = False
 
 
 def _validated_date(date: str | None) -> str:
@@ -36,8 +37,8 @@ CREATE INDEX IF NOT EXISTS idx_thread_token_usage_updated_at
     ON thread_token_usage (updated_at);
 """
 
-CREATE_DAILY_TABLE = """
-CREATE TABLE IF NOT EXISTS user_daily_token_usage (
+CREATE_AGENT_DAILY_TABLE = """
+CREATE TABLE IF NOT EXISTS agent_daily_token_usage (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id         TEXT NOT NULL,
     org_id          TEXT NOT NULL DEFAULT 'default',
@@ -47,10 +48,10 @@ CREATE TABLE IF NOT EXISTS user_daily_token_usage (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (user_id, org_id, agent_name, date)
 );
-CREATE INDEX IF NOT EXISTS idx_user_daily_token_usage_date
-    ON user_daily_token_usage (date);
-CREATE INDEX IF NOT EXISTS idx_user_daily_token_usage_user
-    ON user_daily_token_usage (user_id, org_id, agent_name);
+CREATE INDEX IF NOT EXISTS idx_agent_daily_token_usage_date
+    ON agent_daily_token_usage (date);
+CREATE INDEX IF NOT EXISTS idx_agent_daily_token_usage_user
+    ON agent_daily_token_usage (user_id, org_id, agent_name);
 """
 
 _UPSERT_THREAD = """
@@ -66,12 +67,12 @@ ON CONFLICT (thread_id) DO UPDATE SET
 RETURNING thread_id, total_tokens, input_tokens, output_tokens, agent_name, updated_at;
 """
 
-_UPSERT_DAILY = """
-INSERT INTO user_daily_token_usage
+_UPSERT_AGENT_DAILY = """
+INSERT INTO agent_daily_token_usage
     (user_id, org_id, agent_name, date, total_tokens, updated_at)
 VALUES (%s, %s, %s, %s::date, %s, now())
 ON CONFLICT (user_id, org_id, agent_name, date) DO UPDATE SET
-    total_tokens = user_daily_token_usage.total_tokens + EXCLUDED.total_tokens,
+    total_tokens = agent_daily_token_usage.total_tokens + EXCLUDED.total_tokens,
     updated_at   = now()
 RETURNING user_id, org_id, agent_name, date::text, total_tokens, updated_at;
 """
@@ -81,9 +82,9 @@ SELECT thread_id, total_tokens, input_tokens, output_tokens, agent_name, updated
 FROM thread_token_usage WHERE thread_id = %s;
 """
 
-_GET_DAILY = """
+_GET_AGENT_DAILY = """
 SELECT user_id, org_id, agent_name, date::text, total_tokens, updated_at
-FROM user_daily_token_usage
+FROM agent_daily_token_usage
 WHERE user_id = %s AND org_id = %s AND agent_name = %s AND date = %s::date;
 """
 
@@ -93,17 +94,17 @@ class TokenUsagePostgresRepository:
 
     def __init__(self, database_uri: str) -> None:
         self._uri = database_uri
-        self._tables_ensured = False
 
     async def ensure_tables(self) -> None:
         """Create token usage tables if they do not exist (idempotent, once per process)."""
-        if self._tables_ensured:
+        global _TABLES_ENSURED  # noqa: PLW0603
+        if _TABLES_ENSURED:
             return
         async with await psycopg.AsyncConnection.connect(self._uri) as conn:
             await conn.execute(CREATE_THREAD_TABLE)
-            await conn.execute(CREATE_DAILY_TABLE)
+            await conn.execute(CREATE_AGENT_DAILY_TABLE)
             await conn.commit()
-        self._tables_ensured = True
+        _TABLES_ENSURED = True
         logger.info("token_usage tables ensured in postgres")
 
     async def increment_usage(
@@ -125,13 +126,13 @@ class TokenUsagePostgresRepository:
                 _UPSERT_THREAD,
                 (thread_id, total_delta, input_tokens, output_tokens, agent_name),
             )
-            await conn.commit()
             row = await cur.fetchone()
+            await conn.commit()
         if row is None:
             raise RuntimeError("Failed to increment postgres thread token usage")
         return dict(row)
 
-    async def increment_daily_usage(
+    async def increment_agent_daily_usage(
         self,
         user_id: str,
         tokens: int,
@@ -147,13 +148,13 @@ class TokenUsagePostgresRepository:
             self._uri, row_factory=dict_row
         ) as conn:
             cur = await conn.execute(
-                _UPSERT_DAILY,
+                _UPSERT_AGENT_DAILY,
                 (user_id, org_id, agent_name, day, tokens),
             )
-            await conn.commit()
             row = await cur.fetchone()
+            await conn.commit()
         if row is None:
-            raise RuntimeError("Failed to increment postgres daily token usage")
+            raise RuntimeError("Failed to increment postgres agent daily token usage")
         return dict(row)
 
     async def get_thread_usage(self, thread_id: str) -> dict[str, Any] | None:
@@ -165,7 +166,7 @@ class TokenUsagePostgresRepository:
             row = await cur.fetchone()
         return dict(row) if row is not None else None
 
-    async def get_daily_usage(
+    async def get_agent_daily_usage(
         self,
         user_id: str,
         *,
@@ -178,6 +179,6 @@ class TokenUsagePostgresRepository:
         async with await psycopg.AsyncConnection.connect(
             self._uri, row_factory=dict_row
         ) as conn:
-            cur = await conn.execute(_GET_DAILY, (user_id, org_id, agent_name, day))
+            cur = await conn.execute(_GET_AGENT_DAILY, (user_id, org_id, agent_name, day))
             row = await cur.fetchone()
         return dict(row) if row is not None else None

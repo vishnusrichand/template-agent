@@ -2,6 +2,7 @@
 from __future__ import annotations
 from unittest.mock import AsyncMock, patch
 import pytest
+from deep_agent.src.token_budget import postgres_repository
 from deep_agent.src.token_budget.postgres_repository import TokenUsagePostgresRepository
 
 TEST_URI = "postgresql://postgres:postgres@localhost:5432/test"
@@ -28,7 +29,6 @@ def _make_conn_mock(fetchone_return=None):
 @pytest.mark.asyncio
 async def test_increment_usage_returns_dict() -> None:
     repo = TokenUsagePostgresRepository(TEST_URI)
-    repo._tables_ensured = True
 
     mock_row = {
         "thread_id": "t1",
@@ -48,9 +48,8 @@ async def test_increment_usage_returns_dict() -> None:
 
 
 @pytest.mark.asyncio
-async def test_increment_daily_usage_returns_dict() -> None:
+async def test_increment_agent_daily_usage_returns_dict() -> None:
     repo = TokenUsagePostgresRepository(TEST_URI)
-    repo._tables_ensured = True
 
     mock_row = {
         "user_id": "u1",
@@ -63,7 +62,7 @@ async def test_increment_daily_usage_returns_dict() -> None:
     _, mock_connect = _make_conn_mock(fetchone_return=mock_row)
 
     with patch("psycopg.AsyncConnection.connect", new=mock_connect):
-        result = await repo.increment_daily_usage(
+        result = await repo.increment_agent_daily_usage(
             "u1", 200, org_id="org-a", agent_name="health-assistant", date="2026-07-25"
         )
 
@@ -75,7 +74,6 @@ async def test_increment_daily_usage_returns_dict() -> None:
 @pytest.mark.asyncio
 async def test_get_thread_usage_returns_none_when_missing() -> None:
     repo = TokenUsagePostgresRepository(TEST_URI)
-    repo._tables_ensured = True
 
     _, mock_connect = _make_conn_mock(fetchone_return=None)
 
@@ -86,14 +84,31 @@ async def test_get_thread_usage_returns_none_when_missing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ensure_tables_runs_once() -> None:
+async def test_get_agent_daily_usage_returns_none_when_missing() -> None:
     repo = TokenUsagePostgresRepository(TEST_URI)
-    repo._tables_ensured = False
 
-    _, mock_connect = _make_conn_mock()
+    _, mock_connect = _make_conn_mock(fetchone_return=None)
 
     with patch("psycopg.AsyncConnection.connect", new=mock_connect):
-        await repo.ensure_tables()
-        await repo.ensure_tables()
+        result = await repo.get_agent_daily_usage(
+            "missing-user", org_id="org-a", agent_name="health-assistant", date="2026-07-25"
+        )
 
-    assert mock_connect.call_count == 1
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_ensure_tables_runs_once() -> None:
+    postgres_repository._TABLES_ENSURED = False
+    try:
+        repo = TokenUsagePostgresRepository(TEST_URI)
+
+        _, mock_connect = _make_conn_mock()
+
+        with patch("psycopg.AsyncConnection.connect", new=mock_connect):
+            await repo.ensure_tables()
+            await repo.ensure_tables()
+
+        assert mock_connect.call_count == 1
+    finally:
+        postgres_repository._TABLES_ENSURED = False
