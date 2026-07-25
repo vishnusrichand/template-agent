@@ -140,6 +140,61 @@ async def test_check_and_record_increments_postgres_and_daily_usage() -> None:
 
 
 @pytest.mark.asyncio
+async def test_check_and_record_uses_caller_org_id_when_deployed_org_unset() -> None:
+    """Middle-tier org_id: DEPLOYED_AGENT_ORG is empty, caller-supplied org_id is used."""
+    config = TokenBudgetConfig(enabled=True)
+    row = {
+        "total_tokens": 150,
+        "input_tokens": 100,
+        "output_tokens": 50,
+    }
+
+    mock_repo = AsyncMock()
+    mock_repo.increment_usage.return_value = row
+    mock_repo.increment_agent_daily_usage.return_value = {
+        "user_id": "user-1",
+        "org_id": "customer-abc",
+        "agent_name": "health-assistant",
+        "total_tokens": 150,
+        "date": "2026-06-23",
+        "updated_at": datetime(2026, 6, 23, 12, 0, tzinfo=UTC),
+    }
+
+    mock_settings = MagicMock()
+    mock_settings.DEPLOYED_AGENT_NAME = ""
+    mock_settings.DEPLOYED_AGENT_ORG = ""  # not set → fall through to caller-supplied
+    mock_settings.database_uri = "postgresql://postgres:postgres@localhost:5432/test"
+
+    with (
+        patch(
+            "deep_agent.src.token_budget.service.agent_config.get_token_budget_config",
+            return_value=config,
+        ),
+        patch(
+            "deep_agent.src.token_budget.service.agent_config.get_name",
+            return_value="health-assistant",
+        ),
+        patch("deep_agent.src.token_budget.service.settings", mock_settings),
+        patch(
+            "deep_agent.src.token_budget.service._pg_repo",
+            return_value=mock_repo,
+        ),
+        patch("deep_agent.src.token_budget.otel_emit.emit_token_usage"),
+        patch("deep_agent.src.token_budget.otel_emit.emit_daily_token_usage"),
+    ):
+        await check_and_record(
+            "thread-1", 100, 50, user_id="user-1", org_id="customer-abc"
+        )
+
+    mock_repo.increment_agent_daily_usage.assert_awaited_once_with(
+        "user-1",
+        150,
+        org_id="customer-abc",
+        agent_name="health-assistant",
+    )
+
+
+@pytest.mark.asyncio
 async def test_check_and_record_skips_daily_without_user_id() -> None:
     config = TokenBudgetConfig(enabled=True)
     row = {
