@@ -432,6 +432,7 @@ CREATE TABLE IF NOT EXISTS evals (
 CREATE INDEX IF NOT EXISTS evals_org_name_hash ON evals (org, name, config_hash);
 CREATE INDEX IF NOT EXISTS evals_status ON evals (eval_status);
 CREATE INDEX IF NOT EXISTS evals_ls_run_id ON evals (ls_run_id);
+CREATE INDEX IF NOT EXISTS evals_history ON evals (org, name, eval_status, completed_at DESC);
 """
 
 
@@ -646,20 +647,118 @@ async def eval_status() -> dict[str, Any]:
 
 
 @eval_mgmt_router.get("/results")
-async def eval_results() -> dict[str, Any]:
-    """Return the most recent completed eval report."""
+async def eval_results(request: Request) -> dict[str, Any]:
+    """Return a completed eval report.
+
+    Optional query param ``completed_at`` fetches a specific run by its
+    completion timestamp.  Without it the most recent run is returned.
+    """
     from fastapi import HTTPException
 
+    completed_at = request.query_params.get("completed_at")
     await _ensure_evals_table_once()
     async with await _pg_conn() as conn:
-        row = await conn.execute(
-            "SELECT * FROM evals WHERE org=%s AND name=%s AND eval_status='completed' "
-            "ORDER BY completed_at DESC LIMIT 1",
-            (_AGENT_ORG, _AGENT_NAME),
-        )
+        if completed_at:
+            row = await conn.execute(
+                "SELECT * FROM evals WHERE org=%s AND name=%s "
+                "AND eval_status='completed' AND completed_at=%s "
+                "LIMIT 1",
+                (_AGENT_ORG, _AGENT_NAME, completed_at),
+            )
+        else:
+            row = await conn.execute(
+                "SELECT * FROM evals WHERE org=%s AND name=%s "
+                "AND eval_status='completed' "
+                "ORDER BY completed_at DESC LIMIT 1",
+                (_AGENT_ORG, _AGENT_NAME),
+            )
         result = await row.fetchone()
         if not result:
             raise HTTPException(status_code=404, detail="no completed eval results")
         doc = dict(zip([d.name for d in row.description], result))
         doc.pop("id", None)
         return doc
+
+
+@eval_mgmt_router.get("/history")
+async def eval_history(request: Request) -> dict[str, Any]:
+    """Return historical completed eval runs (scalars only, no results_detail)."""
+    limit = min(int(request.query_params.get("limit", "20")), 100)
+    await _ensure_evals_table_once()
+
+    async with await _pg_conn() as conn:
+        count_cur = await conn.execute(
+            "SELECT COUNT(*) FROM evals "
+            "WHERE org=%s AND name=%s AND eval_status='completed'",
+            (_AGENT_ORG, _AGENT_NAME),
+        )
+        total = (await count_cur.fetchone())[0]
+
+        cur = await conn.execute(
+            "SELECT eval_score, pass, fail, error, config_hash, "
+            "       created_at, completed_at "
+            "FROM evals "
+            "WHERE org=%s AND name=%s AND eval_status='completed' "
+            "ORDER BY completed_at DESC LIMIT %s",
+            (_AGENT_ORG, _AGENT_NAME, limit),
+        )
+        cols = [d.name for d in cur.description]
+        runs = []
+        async for row in cur:
+            d = dict(zip(cols, row))
+            for k in ("created_at", "completed_at"):
+                if d.get(k) is not None:
+                    d[k] = d[k].isoformat() if hasattr(d[k], "isoformat") else str(d[k])
+            runs.append(d)
+
+    return {"runs": runs, "total": total}
+
+
+@eval_mgmt_router.get("/trends")
+async def eval_trends(request: Request) -> dict[str, Any]:
+    """Return per-metric score trends across historical eval runs."""
+    limit = min(int(request.query_params.get("limit", "20")), 100)
+    await _ensure_evals_table_once()
+
+    async with await _pg_conn() as conn:
+        cur = await conn.execute(
+            "SELECT results_detail->'summary'->'summary_stats'->'by_metric' as by_metric, "
+            "       eval_score, completed_at "
+            "FROM evals "
+            "WHERE org=%s AND name=%s AND eval_status='completed' "
+            "  AND results_detail IS NOT NULL "
+            "ORDER BY completed_at DESC LIMIT %s",
+            (_AGENT_ORG, _AGENT_NAME, limit),
+        )
+
+        metrics: dict[str, list[dict]] = {}
+        overall: list[dict] = []
+
+        async for row in cur:
+            by_metric_raw, eval_score, completed_at = row
+            ts = (
+                completed_at.isoformat()
+                if hasattr(completed_at, "isoformat")
+                else str(completed_at)
+            )
+            overall.append({"completed_at": ts, "eval_score": eval_score})
+
+            by_metric = by_metric_raw if isinstance(by_metric_raw, dict) else {}
+            for metric_name, stats in by_metric.items():
+                if metric_name not in metrics:
+                    metrics[metric_name] = []
+                metrics[metric_name].append(
+                    {
+                        "completed_at": ts,
+                        "pass_rate": stats.get("pass_rate")
+                        if isinstance(stats, dict)
+                        else None,
+                        "score_mean": (
+                            stats.get("score_statistics", {}).get("mean")
+                            if isinstance(stats, dict)
+                            else None
+                        ),
+                    }
+                )
+
+    return {"metrics": metrics, "overall": overall}
