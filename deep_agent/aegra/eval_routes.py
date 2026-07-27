@@ -567,7 +567,8 @@ async def trigger_eval(request: Request) -> dict[str, Any]:
     async with await _pg_conn() as conn:
         row = await conn.execute(
             "SELECT * FROM evals WHERE org=%s AND name=%s AND config_hash=%s "
-            "AND eval_status='completed' ORDER BY completed_at DESC LIMIT 1",
+            "AND eval_status='completed' AND completed_at > NOW() - INTERVAL '24 hours' "
+            "ORDER BY completed_at DESC LIMIT 1",
             (_AGENT_ORG, _AGENT_NAME, config_hash),
         )
         existing = await row.fetchone()
