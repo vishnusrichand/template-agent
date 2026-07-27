@@ -240,7 +240,7 @@ async def check_and_record(
             user_id=str(daily_row["user_id"]),
             org_id=str(daily_row["org_id"]),
             agent_name=str(daily_row["agent_name"]),
-            total_tokens=int(daily_row["total_tokens"]),
+            total_tokens=total_delta,
             date=str(daily_row["date"]),
             timestamp=daily_row.get("updated_at"),
         )

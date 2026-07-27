@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import threading
 from typing import Any
 
@@ -30,6 +31,28 @@ _CONSECUTIVE_FAILURE_ALERT_THRESHOLD = 5
 _counter_lock = threading.Lock()
 _consecutive_failures = 0
 _total_failures = 0
+
+# register_configure_hook (inheritable=True) creates a new handler instance at each
+# nested RunnableConfig merge in LangGraph, so on_llm_end can fire multiple times
+# for the same LLM call with the same run_id. Deduplicate by run_id to prevent
+# the same call from being counted more than once.
+_DEDUP_MAX = 1024
+_seen_run_ids: set[str] = set()
+_seen_run_ids_order: collections.deque[str] = collections.deque()
+_dedup_lock = threading.Lock()
+
+
+def _is_duplicate_run(run_id: Any) -> bool:
+    """Return True if this run_id has already been recorded; register it otherwise."""
+    rid = str(run_id)
+    with _dedup_lock:
+        if rid in _seen_run_ids:
+            return True
+        _seen_run_ids.add(rid)
+        _seen_run_ids_order.append(rid)
+        if len(_seen_run_ids_order) > _DEDUP_MAX:
+            _seen_run_ids.discard(_seen_run_ids_order.popleft())
+    return False
 
 
 def _on_tracking_success() -> None:
@@ -144,6 +167,9 @@ class TokenBudgetCallbackHandler(AsyncCallbackHandler):
         **kwargs: Any,
     ) -> None:
         """Record token usage when an LLM call completes."""
+        if _is_duplicate_run(run_id):
+            logger.debug("token_budget_callback_duplicate_run_id", run_id=str(run_id))
+            return
         await self._record_tokens(response, metadata, extract_tokens_from_llm_result)
 
 
