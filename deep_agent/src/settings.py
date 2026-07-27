@@ -75,10 +75,6 @@ class Settings(BaseSettings):
     POSTGRES_USER: str = Field(default="postgres")
     POSTGRES_PASSWORD: str = Field(default="postgres")
 
-    # ── MongoDB ───────────────────────────────────────────────────────
-    MONGODB_URI: Optional[str] = Field(default=None, repr=False)
-    MONGODB_DB: str = Field(default="tokenusage")
-
     # ── Redis ─────────────────────────────────────────────────────────
     REDIS_URL: str = Field(default="redis://redis:6379/0")
     REDIS_BROKER_ENABLED: bool = Field(default=True)

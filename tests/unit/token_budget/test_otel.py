@@ -184,16 +184,14 @@ def test_emit_daily_token_usage_logs_expected_payload() -> None:
 
     with (
         patch("deep_agent.src.token_budget.otel_emit.settings", mock_settings),
-        patch(
-            "deep_agent.src.token_budget.otel_emit._agent_name",
-            return_value="health-assistant",
-        ),
         patch.object(otel_emit, "_daily_total_counter", mock_daily_counter),
         patch.object(otel_emit, "_counters_initialized", True),
         patch.object(otel_emit.logger, "info") as log_info,
     ):
         otel_emit.emit_daily_token_usage(
             user_id="user-1",
+            org_id="org-acme",
+            agent_name="health-assistant",
             total_tokens=5000,
             date="2026-06-23",
             timestamp="2026-06-23T18:30:00+00:00",
@@ -202,16 +200,18 @@ def test_emit_daily_token_usage_logs_expected_payload() -> None:
     log_info.assert_called_once_with(
         "token_budget_daily_usage",
         user_id="user-1",
+        org_id="org-acme",
+        **{"agent.name": "health-assistant"},
         total_tokens=5000,
         date="2026-06-23",
         timestamp="2026-06-23T18:30:00+00:00",
-        **{"agent.name": "health-assistant"},
     )
     mock_daily_counter.add.assert_called_once_with(
         5000,
         {
             "agent.name": "health-assistant",
             "user_id": "user-1",
+            "org_id": "org-acme",
             "date": "2026-06-23",
         },
     )

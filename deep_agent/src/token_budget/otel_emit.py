@@ -151,11 +151,13 @@ def emit_token_usage(
 def emit_daily_token_usage(
     *,
     user_id: str,
+    org_id: str,
+    agent_name: str,
     total_tokens: int,
     date: str,
     timestamp: Any | None = None,
 ) -> None:
-    """Emit OTEL metrics and optional span events for a user's daily token rollup."""
+    """Emit OTEL metrics for a user's daily token rollup (per org and agent)."""
     if not token_budget_otel_enabled():
         return
 
@@ -164,10 +166,11 @@ def emit_daily_token_usage(
     recorded_at = _format_timestamp(timestamp)
     attributes = {
         "user_id": user_id,
+        "org_id": org_id,
+        "agent.name": agent_name,
         "total_tokens": total_tokens,
         "date": date,
         "timestamp": recorded_at,
-        "agent.name": _agent_name(),
     }
 
     logger.info("token_budget_daily_usage", **attributes)
@@ -186,8 +189,9 @@ def emit_daily_token_usage(
         _daily_total_counter.add(
             total_tokens,
             {
-                "agent.name": _agent_name(),
+                "agent.name": agent_name,
                 "user_id": user_id,
+                "org_id": org_id,
                 "date": date,
             },
         )

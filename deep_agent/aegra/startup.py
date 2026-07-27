@@ -105,7 +105,7 @@ def _check_mcp_encryption_key() -> None:
 
 
 async def _ensure_database() -> str:
-    """Create personalization, feedback, and token budget tables if they don't exist."""
+    """Create personalization, feedback, MCP, and token budget tables if missing."""
     try:
         from deep_agent.src.feedback.repository import FeedbackRepository
         from deep_agent.src.personalization.repository import (
@@ -126,16 +126,12 @@ async def _ensure_database() -> str:
             mcp_token_store = McpTokenStore(settings.database_uri)
             setup_tasks.append(mcp_token_store.ensure_tables())
 
-        if settings.MONGODB_URI:
-            from deep_agent.src.token_budget.mongo_repository import (
-                TokenUsageMongoRepository,
+            from deep_agent.src.token_budget.postgres_repository import (
+                TokenUsagePostgresRepository,
             )
 
-            mongo_repo = TokenUsageMongoRepository(
-                settings.MONGODB_URI,
-                db_name=settings.MONGODB_DB,
-            )
-            setup_tasks.append(mongo_repo.ensure_indexes())
+            token_usage_repo = TokenUsagePostgresRepository(settings.database_uri)
+            setup_tasks.append(token_usage_repo.ensure_tables())
 
         if not setup_tasks:
             return "skipped: no database configured"
