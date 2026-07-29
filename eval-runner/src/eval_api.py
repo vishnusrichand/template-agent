@@ -3,7 +3,7 @@
 Runs as a separate Deployment (KEDA HTTP-scaled, min=0 max=2) in the same
 namespace as the agentpod. Reads eval_cases.yaml and system.yaml from the
 agent config PVC (written by agent-engine at deploy time). Results are
-written to MongoDB so the agentpod /evals/results route can serve them.
+written to Postgres so the agentpod /evals/results route can serve them.
 
 Endpoints:
     POST /evals/run                Run all patterns
@@ -17,16 +17,18 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import subprocess
 import sys
 import tempfile
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import boto3
 import yaml
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -39,9 +41,33 @@ log = logging.getLogger(__name__)
 
 AGENT_URL = os.environ.get("AGENT_HOST", "http://localhost:5002")
 
+
 # Derive eval file paths from AGENT_CONFIG_DIR so no separate env vars needed.
 # Can still be overridden explicitly via EVAL_CASES_PATH / EVAL_SYSTEM_CONFIG.
-_agent_config_dir = os.environ.get("AGENT_CONFIG_DIR", "/agent-config")
+def _resolve_config_dir() -> str:
+    """Return AGENT_CONFIG_DIR from env, or auto-detect the config directory.
+
+    Walks up from this file looking for config/agent
+    (local dev layout: eval-runner/../config/agent).
+    """
+    if val := os.environ.get("AGENT_CONFIG_DIR"):
+        return val
+    here = Path(__file__).resolve().parent
+    for candidate in [
+        here.parent / "config" / "agent",
+        here / ".." / "config" / "agent",
+    ]:
+        resolved = candidate.resolve()
+        if resolved.is_dir():
+            log.info("AGENT_CONFIG_DIR not set — using auto-detected: %s", resolved)
+            return str(resolved)
+    log.warning(
+        "AGENT_CONFIG_DIR not set and config/agent not found; falling back to /agent-config"
+    )
+    return "/agent-config"
+
+
+_agent_config_dir = _resolve_config_dir()
 EVAL_CASES_PATH = Path(
     os.environ.get(
         "EVAL_CASES_PATH", f"{_agent_config_dir}/evals/lightspeed-agent/eval_cases.yaml"
@@ -66,9 +92,6 @@ _HASH_EXCLUDE_DIRS = {"evals", "deployment"}
 
 def _compute_config_hash(config_dir: str) -> str:
     """SHA256 of behavior-relevant config files (prompts, skills, runtime, tools)."""
-    import hashlib
-    from pathlib import Path
-
     h = hashlib.sha256()
     base = Path(config_dir)
     if base.exists():
@@ -86,46 +109,79 @@ def _compute_config_hash(config_dir: str) -> str:
     return h.hexdigest()[:16]  # 16-char prefix is enough
 
 
-_config_dir = os.environ.get("AGENT_CONFIG_DIR", "config/agent")
 AGENT_CONFIG_HASH = os.environ.get("AGENT_CONFIG_HASH") or _compute_config_hash(
-    _config_dir
+    _agent_config_dir
 )
 
 AGENT_AUTH_TOKEN = os.environ.get("AGENT_AUTH_TOKEN", "")
 EVAL_MAX_CONCURRENCY = int(os.environ.get("EVAL_MAX_CONCURRENCY", "3"))
-EVAL_S3_BUCKET = os.environ.get("EVAL_S3_BUCKET", "")
-
 ALL_PATTERNS = ["tool_use", "structured_output", "hitl", "multi_agent"]
 
+log.info(
+    "eval_api config: agent_url=%s org=%s name=%s config_hash=%s "
+    "eval_cases=%s eval_system=%s max_concurrency=%d",
+    AGENT_URL,
+    AGENT_ORG,
+    AGENT_NAME,
+    AGENT_CONFIG_HASH,
+    EVAL_CASES_PATH,
+    EVAL_SYSTEM_CONFIG,
+    EVAL_MAX_CONCURRENCY,
+)
 
 # ── State ─────────────────────────────────────────────────────────────────────
 
 _status: dict[str, Any] = {"state": "idle", "run_id": None}
 _latest_result: dict[str, Any] | None = None
-_run_lock = asyncio.Lock()
 
 
 # ── Eval runner ───────────────────────────────────────────────────────────────
 
 
 def _find_eval_files(pattern: str | None) -> list[Path]:
-    """Return eval data file(s) for the given pattern from the PVC-mounted cases file."""
+    """Return one temp file per tag (parallel all) or one file for a specific pattern.
+
+    When pattern is None every tag gets its own temp file so _run_eval can run
+    them concurrently via asyncio.gather while keeping conversations sequential
+    within each tag subprocess.
+    """
     if not EVAL_CASES_PATH.exists():
         raise FileNotFoundError(
             "No eval dataset found. Add eval cases before running evaluation."
         )
 
-    if pattern is None:
-        return [EVAL_CASES_PATH]
-
-    # Filter by tag into a temp file
     cases = yaml.safe_load(EVAL_CASES_PATH.read_text()) or []
+    log.info("Loaded %d eval cases from %s", len(cases), EVAL_CASES_PATH)
+
+    if pattern is None:
+        # One temp file per tag — preserves ordering within each tag
+        tags = list(dict.fromkeys(c.get("tag") for c in cases if c.get("tag")))
+        if not tags:
+            log.warning(
+                "No tags found in eval cases — running full file as single batch"
+            )
+            return [EVAL_CASES_PATH]
+        log.info("Splitting cases into %d tag batches: %s", len(tags), tags)
+        files: list[Path] = []
+        for tag in tags:
+            filtered = [c for c in cases if c.get("tag") == tag]
+            tmp = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".yaml", prefix=f"eval_{tag}_", delete=False
+            )
+            yaml.dump(filtered, tmp, default_flow_style=False, allow_unicode=True)
+            tmp.close()
+            files.append(Path(tmp.name))
+            log.debug("Tag '%s': %d case(s) → %s", tag, len(filtered), tmp.name)
+        return files
+
+    # Specific pattern — single filtered temp file
     filtered = [c for c in cases if c.get("tag") == pattern]
     if not filtered:
         raise FileNotFoundError(
             f"No eval cases found for pattern '{pattern}'. "
             "Add cases with this tag before running evaluation."
         )
+    log.info("Pattern '%s': %d matching case(s)", pattern, len(filtered))
     tmp = tempfile.NamedTemporaryFile(
         mode="w", suffix=".yaml", prefix=f"eval_{pattern}_", delete=False
     )
@@ -184,22 +240,27 @@ def _run_eval_pattern_sync(
     env = dict(os.environ)
     if auth_token:
         env["AGENT_AUTH_TOKEN"] = auth_token  # user session token for MCP tool calls
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(runner),
-            "--agent-url",
-            AGENT_URL,
-            "--eval-data",
-            str(eval_file),
-            "--system",
-            str(system_yaml),
-            "--output-dir",
-            str(output_dir),
-        ],
-        check=False,
-        env=env,
+    cmd = [
+        sys.executable,
+        str(runner),
+        "--agent-url",
+        AGENT_URL,
+        "--eval-data",
+        str(eval_file),
+        "--system",
+        str(system_yaml),
+        "--output-dir",
+        str(output_dir),
+    ]
+    log.info("Spawning subprocess: %s", " ".join(cmd))
+    result = subprocess.run(cmd, check=False, env=env)
+    log.info(
+        "Subprocess exited: file=%s exit_code=%d", eval_file.name, result.returncode
     )
+    if result.returncode != 0:
+        log.warning(
+            "Non-zero exit for %s — check run_eval.py output above", eval_file.name
+        )
     return result.returncode
 
 
@@ -211,23 +272,6 @@ async def _run_eval_pattern(
     return await loop.run_in_executor(
         None, _run_eval_pattern_sync, eval_file, system_yaml, output_dir, auth_token
     )
-
-
-def _upload_to_s3(local_dir: Path, run_id: str) -> str | None:
-    """Upload result files to S3. Returns s3_prefix or None."""
-    if not EVAL_S3_BUCKET:
-        return None
-    s3_prefix = f"evals/{AGENT_ORG}/{AGENT_NAME}/{AGENT_CONFIG_HASH}/{run_id}/"
-    try:
-        s3 = boto3.client("s3")
-        for fpath in local_dir.iterdir():
-            if fpath.is_file():
-                s3.upload_file(str(fpath), EVAL_S3_BUCKET, f"{s3_prefix}{fpath.name}")
-                log.info("Uploaded s3://%s/%s%s", EVAL_S3_BUCKET, s3_prefix, fpath.name)
-        return s3_prefix
-    except Exception as exc:
-        log.error("S3 upload failed: %s", exc)
-        return None
 
 
 def _score_from_counts(passed: int, failed: int, errors: int) -> tuple[str, float]:
@@ -242,140 +286,6 @@ def _score_from_counts(passed: int, failed: int, errors: int) -> tuple[str, floa
     else:
         status = "failed"
     return status, score
-
-
-def _load_results_from_db(run_started_at: datetime) -> dict[str, Any]:
-    """Load eval results from the evaluation_results PostgreSQL table.
-
-    Finds the latest run_id written since run_started_at, fetches all rows for
-    it, serialises them to JSON-safe dicts, and computes a summary. Returns a
-    dict with 'turns' and 'summary' keys, or an empty dict if the query fails.
-    """
-    from collections import defaultdict
-
-    try:
-        import psycopg2
-        import psycopg2.extras
-    except ImportError as exc:
-        log.warning("psycopg2 not available, skipping DB result load: %s", exc)
-        return {}
-
-    try:
-        conn = psycopg2.connect(
-            host=os.environ.get("POSTGRES_HOST", "localhost"),
-            port=int(os.environ.get("POSTGRES_PORT", "5432")),
-            dbname=os.environ.get("POSTGRES_DB", "template_agent"),
-            user=os.environ.get("POSTGRES_USER", "postgres"),
-            password=os.environ.get("POSTGRES_PASSWORD", "postgres"),
-        )
-        try:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                # Find the latest run_id for rows written during this eval run
-                cur.execute(
-                    "SELECT run_id FROM evaluation_results "
-                    "WHERE timestamp >= %s "
-                    "ORDER BY timestamp DESC LIMIT 1",
-                    (run_started_at,),
-                )
-                row = cur.fetchone()
-                if row is None:
-                    log.warning(
-                        "No evaluation_results rows found since %s", run_started_at
-                    )
-                    return {}
-
-                db_run_id = row["run_id"]
-                log.info("Loading DB results for run_id=%s", db_run_id)
-
-                cur.execute(
-                    "SELECT * FROM evaluation_results WHERE run_id = %s",
-                    (db_run_id,),
-                )
-                raw_rows = cur.fetchall()
-        finally:
-            conn.close()
-    except Exception as exc:
-        log.warning("Could not load eval results from DB: %s", exc)
-        return {}
-
-    # --- Compute summary from raw (typed) rows before serialisation ---
-    overall_counts: dict[str, int] = {"PASS": 0, "FAIL": 0, "ERROR": 0}
-    by_metric: dict[str, dict[str, Any]] = defaultdict(
-        lambda: {"pass": 0, "fail": 0, "scores": []}
-    )
-    by_conversation: dict[str, dict[str, int]] = defaultdict(
-        lambda: {"pass": 0, "fail": 0}
-    )
-
-    for r in raw_rows:
-        result_val = str(r.get("result") or "").upper()
-        if result_val not in overall_counts:
-            result_val = "ERROR"
-        overall_counts[result_val] += 1
-
-        metric = str(r.get("metric_identifier") or "unknown")
-        if result_val == "PASS":
-            by_metric[metric]["pass"] += 1
-        elif result_val == "FAIL":
-            by_metric[metric]["fail"] += 1
-        try:
-            score = float(r.get("score") or 0)
-            by_metric[metric]["scores"].append(score)
-        except (TypeError, ValueError):
-            pass
-
-        conv_id = str(r.get("conversation_group_id") or "unknown")
-        if result_val == "PASS":
-            by_conversation[conv_id]["pass"] += 1
-        elif result_val == "FAIL":
-            by_conversation[conv_id]["fail"] += 1
-
-    total = len(raw_rows)
-    overall_with_rates: dict[str, Any] = dict(overall_counts)
-    overall_with_rates["pass_rate"] = (
-        round(overall_counts["PASS"] / total, 3) if total else 0.0
-    )
-    overall_with_rates["fail_rate"] = (
-        round(overall_counts["FAIL"] / total, 3) if total else 0.0
-    )
-    overall_with_rates["error_rate"] = (
-        round(overall_counts["ERROR"] / total, 3) if total else 0.0
-    )
-
-    by_metric_out: dict[str, Any] = {}
-    for metric, data in by_metric.items():
-        m_total = data["pass"] + data["fail"]
-        scores = data["scores"]
-        by_metric_out[metric] = {
-            "pass": data["pass"],
-            "fail": data["fail"],
-            "pass_rate": round(data["pass"] / m_total, 3) if m_total else 0.0,
-            "score_mean": round(sum(scores) / len(scores), 3) if scores else 0.0,
-        }
-
-    summary: dict[str, Any] = {
-        "total_evaluations": total,
-        "summary_stats": {
-            "overall": overall_with_rates,
-            "by_metric": by_metric_out,
-            "by_conversation": {k: dict(v) for k, v in by_conversation.items()},
-        },
-    }
-
-    # --- Serialise rows to JSON-safe dicts ---
-    turns: list[dict[str, Any]] = []
-    for r in raw_rows:
-        turn: dict[str, Any] = {}
-        for k, v in r.items():
-            if isinstance(v, datetime):
-                turn[k] = v.isoformat()
-            elif isinstance(v, float):
-                turn[k] = str(v)
-            else:
-                turn[k] = v
-        turns.append(turn)
-
-    return {"turns": turns, "summary": summary, "ls_run_id": db_run_id}
 
 
 async def _run_eval(
@@ -404,7 +314,7 @@ async def _run_eval(
         # Track temp files created by _find_eval_files (tag-filtered) for cleanup
         tmp_files = [f for f in eval_files if f.parent != EVAL_CASES_PATH.parent]
     except FileNotFoundError as exc:
-        log.error("%s", exc)
+        log.error("eval_setup_failed: %s", exc)
         _status.update({"state": "error", "run_id": run_id})
         return
 
@@ -427,18 +337,10 @@ async def _run_eval(
     finally:
         for tmp in tmp_files:
             tmp.unlink(missing_ok=True)
-        # Clean up the injected system.yaml temp file
-        if "system_yaml" in locals():
-            try:
-                system_yaml.unlink(missing_ok=True)
-            except Exception:
-                pass
+        system_yaml.unlink(missing_ok=True)
 
     total_pass, total_fail, total_error = 0, 0, 0
     eval_status, eval_score = _score_from_counts(total_pass, total_fail, total_error)
-
-    s3_prefix = _upload_to_s3(run_output, run_id)
-    s3_url = f"s3://{EVAL_S3_BUCKET}/{s3_prefix}summary.json" if s3_prefix else None
 
     result: dict[str, Any] = {
         "run_id": run_id,
@@ -451,7 +353,6 @@ async def _run_eval(
         "fail": total_fail,
         "error": total_error,
         "output_dir": str(run_output),
-        "s3_url": s3_url,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -461,9 +362,13 @@ async def _run_eval(
     # Build rich results_detail from the evaluation_results PostgreSQL table
     results_detail = dict(result)
     db_data = await asyncio.get_running_loop().run_in_executor(
-        None, _load_results_from_db, run_started_at
+        None, load_results_since, run_started_at
     )
     results_detail.update(db_data)
+    if not db_data:
+        log.warning(
+            "No DB results found for run_id=%s — summary will show zeros", run_id
+        )
 
     # Recompute scalars from DB summary — file storage was removed so
     # _aggregate_summaries() returned zeros; DB summary has the real counts.
@@ -500,28 +405,44 @@ async def _run_eval(
 
     # Write results to Postgres so agentpod /evals/results can serve them
     try:
-        from eval_postgres import write_eval_result
-
         write_eval_result(
             passed=total_pass,
             failed=total_fail,
             errors=total_error,
             eval_score=eval_score,
+            ls_run_ids=results_detail.get("ls_run_ids"),
             results_detail=results_detail,
-            ls_run_id=results_detail.get("ls_run_id"),
             config_hash=config_hash,
             org=org,
             name=name,
         )
     except Exception as exc:
-        log.error("Postgres write failed (results still available locally): %s", exc)
+        log.error(
+            "postgres_write_failed (%s) — results still available locally",
+            type(exc).__name__,
+        )
 
 
 # ── FastAPI app ────────────────────────────────────────────────────────────────
 # eval_cases.yaml and system.yaml are pre-written to the PVC by agent-engine
 # at deploy time — no startup auto-run or case management needed here.
 
-app = FastAPI(title="eval-runner", version="2.0.0")
+
+from eval_postgres import (  # noqa: E402
+    ensure_table,
+    get_results_by_run_id,
+    load_results_since,
+    write_eval_result,
+)
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    await asyncio.get_running_loop().run_in_executor(None, ensure_table)
+    yield
+
+
+app = FastAPI(title="eval-runner", version="2.0.0", lifespan=_lifespan)
 
 
 class EvalRunBody(BaseModel):
@@ -554,15 +475,22 @@ async def _trigger(
     auth_token: str = "",
 ) -> dict[str, Any]:
     if _status["state"] == "running":
+        log.warning(
+            "Eval trigger rejected — run %s already in progress", _status.get("run_id")
+        )
         raise HTTPException(
             status_code=409, detail="An eval run is already in progress"
         )
     if not EVAL_CASES_PATH.exists():
+        log.error("Eval trigger rejected — eval_cases not found: %s", EVAL_CASES_PATH)
         raise HTTPException(
             status_code=400,
             detail="No eval dataset found. Add eval cases before running evaluation.",
         )
     if not EVAL_SYSTEM_CONFIG.exists():
+        log.error(
+            "Eval trigger rejected — system config not found: %s", EVAL_SYSTEM_CONFIG
+        )
         raise HTTPException(
             status_code=400,
             detail="Eval system configuration not found. Ensure the agent config is mounted.",
@@ -571,6 +499,15 @@ async def _trigger(
     config_hash = body.config_hash if body else None
     org = body.org if body else None
     name = body.name if body else None
+    log.info(
+        "Eval triggered: run_id=%s pattern=%s org=%s name=%s config_hash=%s auth_token_present=%s",
+        run_id,
+        pattern or "all",
+        org,
+        name,
+        config_hash,
+        bool(auth_token),
+    )
     background.add_task(_run_eval, pattern, config_hash, org, name, auth_token)
     return {
         "run_id": run_id,
@@ -588,14 +525,16 @@ async def run_all(
 
 
 @app.post("/evals/run/{pattern}", status_code=202)
-async def run_pattern(pattern: str, background: BackgroundTasks) -> dict[str, Any]:
+async def run_pattern(
+    pattern: str, request: Request, background: BackgroundTasks
+) -> dict[str, Any]:
     """Run one eval pattern (tool_use / hitl / structured_output / multi_agent)."""
     if pattern not in ALL_PATTERNS:
         raise HTTPException(
             status_code=400,
             detail=f"Unknown pattern '{pattern}'. Valid: {ALL_PATTERNS}",
         )
-    return await _trigger(pattern, background)
+    return await _trigger(pattern, background, auth_token=_extract_token(request))
 
 
 @app.get("/evals/status")
@@ -616,35 +555,19 @@ async def get_latest_results() -> JSONResponse:
 async def get_run_results(run_id: str) -> JSONResponse:
     """Return results for a specific run ID from the evaluation_results Postgres table."""
     try:
-        import psycopg2
-
-        conn = psycopg2.connect(
-            host=os.environ.get("POSTGRES_HOST", "localhost"),
-            port=int(os.environ.get("POSTGRES_PORT", "5432")),
-            dbname=os.environ.get("POSTGRES_DB", "template_agent"),
-            user=os.environ.get("POSTGRES_USER", "postgres"),
-            password=os.environ.get("POSTGRES_PASSWORD", ""),
-            connect_timeout=5,
+        rows = await asyncio.get_running_loop().run_in_executor(
+            None, get_results_by_run_id, run_id
         )
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT conversation_group_id, turn_id, metric_identifier, result, score, reason "
-                    "FROM evaluation_results WHERE run_id = %s ORDER BY id",
-                    (run_id,),
-                )
-                cols = [d[0] for d in cur.description]
-                rows = [dict(zip(cols, r)) for r in cur.fetchall()]
-        conn.close()
-        if not rows:
-            raise HTTPException(
-                status_code=404, detail=f"No results found for run '{run_id}'"
-            )
-        return JSONResponse({"run_id": run_id, "results": rows})
-    except HTTPException:
-        raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        log.error("get_run_results failed for run_id=%s: %s", run_id, exc)
+        raise HTTPException(
+            status_code=500, detail="Failed to retrieve eval results"
+        ) from exc
+    if not rows:
+        raise HTTPException(
+            status_code=404, detail=f"No results found for run '{run_id}'"
+        )
+    return JSONResponse({"run_id": run_id, "results": rows})
 
 
 @app.get("/health")

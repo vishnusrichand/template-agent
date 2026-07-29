@@ -7,12 +7,11 @@ RUN pip install --no-cache-dir \
     "lightspeed-evaluation @ git+https://github.com/lightspeed-core/lightspeed-evaluation.git@v0.7.0" \
     fastapi \
     "uvicorn[standard]" \
-    boto3 \
     httpx \
     pyyaml \
     psycopg2-binary
 
-COPY eval_api.py run_eval.py eval_cases.py eval_postgres.py ./
+COPY src/ ./
 
 # /evals  — mounted from PVC: system.yaml + eval_*.yaml (agent-engine writes these)
 # /eval_output — mount a volume here for result persistence

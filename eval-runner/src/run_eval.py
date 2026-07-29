@@ -14,7 +14,7 @@ Usage:
         --output-dir ./results
 
 Requires:
-    GOOGLE_API_KEY env var
+    GOOGLE_API_KEY  or  GOOGLE_APPLICATION_CREDENTIALS_CONTENT  (Vertex AI service account JSON)
     pip install "lightspeed-evaluation @ git+https://github.com/lightspeed-core/lightspeed-evaluation.git@v0.7.0"
 
 Agent API (standard LangGraph Platform — no custom endpoints needed):
@@ -27,10 +27,12 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import logging
 import os
 import subprocess
 import sys
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -48,7 +50,15 @@ AGENT_SSL_VERIFY = os.environ.get("AGENT_SSL_VERIFY", "true").lower() not in (
     "0",
 )
 ASSISTANT_ID = "agent"
-MAX_HITL_APPROVALS = 10  # safety cap on auto-approvals per turn
+MAX_HITL_APPROVALS = 50  # safety cap on auto-approvals per turn
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+    stream=sys.stderr,
+)
+log = logging.getLogger("run_eval")
 
 
 # ── SSE parsing ──────────────────────────────────────────────────────────────
@@ -211,7 +221,10 @@ def _stream_one_request(
     """
     url = f"{agent_url.rstrip('/')}/threads/{thread_id}/runs/stream"
     raw: list[str] = []
-    with httpx.Client(timeout=timeout) as c:
+    # Use a separate read timeout: SSE streams can stay open for the full turn
+    # duration (especially with HITL auto-approvals + slow LLM under parallel load).
+    stream_timeout = httpx.Timeout(connect=10.0, read=timeout, write=10.0, pool=5.0)
+    with httpx.Client(timeout=stream_timeout, verify=AGENT_SSL_VERIFY) as c:
         with c.stream("POST", url, json=body, headers=_headers(auth_token)) as resp:
             resp.raise_for_status()
             try:
@@ -244,7 +257,19 @@ def _extract_node_updates(data: Any) -> list[dict[str, Any]]:
     return []
 
 
-_INTERNAL_TOOLS = frozenset({"write_todos", "task"})
+_INTERNAL_TOOLS = frozenset(
+    {
+        "write_todos",
+        "task",
+        "read_file",
+        "write_file",
+        "ls",
+        "glob",
+        "grep",
+        "execute_command",
+        "compact_conversation",
+    }
+)
 
 
 def _collect_from_events(
@@ -316,69 +341,6 @@ def _collect_from_events(
     return ai_texts, tool_calls, contexts
 
 
-def _get_thread_tool_calls(
-    agent_url: str,
-    thread_id: str,
-    auth_token: str | None,
-    timeout: int,
-) -> list[dict[str, Any]]:
-    """Fetch orchestrator-level tool calls from thread history.
-
-    The LangGraph Platform only exposes the root graph's checkpoints — subagent
-    executions (analyst, publisher) run as independent tasks whose internal tool
-    calls (calculate_bmi_value, send_email) are not stored in the parent thread.
-
-    What IS visible and useful for tool_eval:
-      - task(subagent_type=analyst)  → resolved to "analyst"  by _resolve_tool_name
-      - task(subagent_type=publisher) → resolved to "publisher"
-      - validate_email (called directly by the orchestrator)
-    """
-    url = f"{agent_url.rstrip('/')}/threads/{thread_id}/history"
-    tool_calls: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    try:
-        with httpx.Client(timeout=timeout) as c:
-            resp = c.post(url, json={"limit": 200}, headers=_headers(auth_token))
-            resp.raise_for_status()
-            checkpoints = resp.json()
-        for checkpoint in checkpoints:
-            messages = checkpoint.get("values", {}).get("messages", [])
-            for msg in messages:
-                if not isinstance(msg, dict) or msg.get("type") != "ai":
-                    continue
-                for tc in msg.get("tool_calls", []):
-                    name = tc.get("name", "")
-                    tc_id = tc.get("id", "")
-                    if not name:
-                        continue
-                    if tc_id and tc_id in seen:
-                        continue
-                    if tc_id:
-                        seen.add(tc_id)
-                    resolved = _resolve_tool_name(tc)
-                    if resolved in _INTERNAL_TOOLS:
-                        continue
-                    tool_calls.append(
-                        {
-                            "tool_name": resolved,
-                            "arguments": tc.get("args", {}),
-                        }
-                    )
-    except Exception as exc:
-        print(
-            f"  WARNING: could not fetch thread history for tool calls: {exc}",
-            file=sys.stderr,
-        )
-    return tool_calls
-
-
-def _first_nonempty(texts: list[str]) -> str:
-    for t in texts:
-        if t.strip():
-            return t
-    return ""
-
-
 def _last_nonempty(texts: list[str]) -> str:
     for t in reversed(texts):
         if t.strip():
@@ -411,7 +373,7 @@ def _call_agent(
     body: dict[str, Any] = {
         "assistant_id": ASSISTANT_ID,
         "input": {"messages": [{"role": "human", "content": query}]},
-        "stream_mode": "updates",
+        "stream_mode": ["updates", "events"],
         "stream_subgraphs": True,
     }
     events, interrupted = _stream_one_request(
@@ -439,7 +401,8 @@ def _call_agent(
         resume_body: dict[str, Any] = {
             "assistant_id": ASSISTANT_ID,
             "command": {"resume": {"decisions": [{"type": "approve"}] * n_decisions}},
-            "stream_mode": "updates",
+            "stream_mode": ["updates", "events"],
+            "stream_subgraphs": True,
         }
         events, interrupted = _stream_one_request(
             agent_url, thread_id, resume_body, auth_token, timeout
@@ -449,8 +412,15 @@ def _call_agent(
         all_tool_calls.extend(tcs)
         all_contexts.extend(ctxs)
 
+    if interrupted:
+        log.warning(
+            "HITL approval cap (%d) reached — run may be incomplete", MAX_HITL_APPROVALS
+        )
+
+    final_response = _last_nonempty(all_ai_texts)
+
     return {
-        "response": _last_nonempty(all_ai_texts),  # final post-approval response
+        "response": final_response,
         "pre_approval_response": pre_approval_response,  # what agent said when it paused
         "was_interrupted": was_interrupted,
         "tool_calls_made": all_tool_calls,
@@ -468,25 +438,46 @@ def _fetch_subagent_tool_calls(
     thread_id: str,
     auth_token: str | None,
     timeout: int,
+    *,
+    retries: int = 4,
+    retry_delay: float = 3.0,
 ) -> list[dict[str, Any]]:
     """Fetch subagent tool calls (calculate_bmi, send_email, etc.) from the agent.
 
     Calls GET /v1/eval/thread-tool-calls/{thread_id} which reads directly from
     Postgres checkpoint_blobs across all subagent namespaces — bypassing the
     LangGraph HTTP API limitation that only exposes subgraph state during interrupts.
+
+    Retries are necessary in parallel eval runs: LangGraph Platform dispatches
+    the analyst as a background task and its checkpoint_blobs reach Postgres
+    slightly after the main graph's SSE stream closes. Without retries the fetch
+    races the checkpoint write and returns an empty list.
     """
     url = f"{agent_url.rstrip('/')}/v1/eval/thread-tool-calls/{thread_id}"
-    try:
-        with httpx.Client(timeout=timeout, verify=AGENT_SSL_VERIFY) as c:
-            resp = c.get(url, headers=_headers(auth_token))
-            resp.raise_for_status()
-            return resp.json().get("tool_calls", [])  # type: ignore[no-any-return]
-    except Exception as exc:
-        print(
-            f"  WARNING: could not fetch subagent tool calls: {exc}",
-            file=sys.stderr,
+    last_exc: Exception | None = None
+    for attempt in range(retries):
+        try:
+            with httpx.Client(timeout=timeout, verify=AGENT_SSL_VERIFY) as c:
+                resp = c.get(url, headers=_headers(auth_token))
+                resp.raise_for_status()
+                tool_calls = resp.json().get("tool_calls", [])
+            if tool_calls:
+                return tool_calls  # type: ignore[no-any-return]
+            # Empty result — subagent checkpoint may not be flushed yet.
+            if attempt < retries - 1:
+                time.sleep(retry_delay * (attempt + 1))
+        except Exception as exc:
+            last_exc = exc
+            if attempt < retries - 1:
+                time.sleep(retry_delay * (attempt + 1))
+    if last_exc:
+        log.warning(
+            "subagent_tool_calls_fetch_failed after %d attempts (%s): %s",
+            retries,
+            type(last_exc).__name__,
+            last_exc,
         )
-        return []
+    return []
 
 
 def _populate_group(
@@ -497,12 +488,14 @@ def _populate_group(
 ) -> dict[str, Any]:
     """Run all turns in one conversation group and return the populated group."""
     group_id = group.get("conversation_group_id", "unknown")
-    print(f"\n[eval] {group_id}", flush=True)
+    log.info("[%s] starting", group_id)
 
     try:
         thread_id = _create_thread(agent_url, auth_token, timeout)
     except Exception as exc:
-        print(f"  ERROR creating thread for {group_id}: {exc}", file=sys.stderr)
+        log.error(
+            "[%s] thread_create_failed (%s): %s", group_id, type(exc).__name__, exc
+        )
         for turn in group.get("turns", []):
             turn["response"] = _AGENT_ERROR_RESPONSE
         return group
@@ -510,12 +503,18 @@ def _populate_group(
     for turn in group.get("turns", []):
         turn_id = turn.get("turn_id", "?")
         query = turn["query"]
-        print(f"  [{group_id}] turn={turn_id}  query={query[:70]}…", flush=True)
+        log.info("[%s] turn=%s running", group_id, turn_id)
 
         try:
             result = _call_agent(agent_url, query, thread_id, auth_token, timeout)
         except Exception as exc:
-            print(f"  [{group_id}] ERROR: {exc}", file=sys.stderr)
+            log.error(
+                "[%s] turn=%s agent_call_failed (%s): %s",
+                group_id,
+                turn_id,
+                type(exc).__name__,
+                exc,
+            )
             result = {
                 "response": _AGENT_ERROR_RESPONSE,
                 "tool_calls_made": [],
@@ -529,10 +528,10 @@ def _populate_group(
             scored_response = (
                 result.get("pre_approval_response") or _AGENT_ERROR_RESPONSE
             )
-            hint = "(pre-approval)"
+            hint = "pre-approval"
         else:
             scored_response = result["response"] or _AGENT_ERROR_RESPONSE
-            hint = "(post-approval)" if result.get("was_interrupted") else ""
+            hint = "post-approval" if result.get("was_interrupted") else "direct"
 
         turn["response"] = scored_response
 
@@ -551,8 +550,13 @@ def _populate_group(
         if result["contexts"]:
             turn["contexts"] = result["contexts"]
 
-        preview = scored_response[:90].replace("\n", " ")
-        print(f"  [{group_id}] → {hint} {preview}…", flush=True)
+        log.info(
+            "[%s] turn=%s done mode=%s tool_calls=%d",
+            group_id,
+            turn_id,
+            hint,
+            len(all_tool_calls),
+        )
 
     return group
 
@@ -578,7 +582,7 @@ def _populate_dataset(
             try:
                 results[idx] = future.result()
             except Exception as exc:
-                print(f"  ERROR in group {idx}: {exc}", file=sys.stderr)
+                log.error("group[%d] unhandled (%s): %s", idx, type(exc).__name__, exc)
                 results[idx] = groups[idx]
 
     return [results[i] for i in range(len(groups))]
@@ -600,18 +604,11 @@ def _find_lightspeed_cmd() -> list[str] | None:
     return None
 
 
-_GRANITE_API_BASE = (
-    "https://granite-3-1-8b-instruct--apicast-staging"
-    ".apps.int.stc.ai.prod.us-east-1.aws.paas.redhat.com:443/v1"
-)
-
-
 def _subprocess_env() -> tuple[dict[str, str], list[Path]]:
     """Return env overrides and temp files needed by the lightspeed-eval subprocess.
 
-    - Writes GOOGLE_APPLICATION_CREDENTIALS_CONTENT to a temp file so that
-      Vertex AI / ADC works without a GOOGLE_API_KEY.
-    - Injects HOSTED_VLLM_API_BASE / HOSTED_VLLM_API_KEY for the Granite judge.
+    Writes GOOGLE_APPLICATION_CREDENTIALS_CONTENT to a temp file so that
+    Vertex AI / ADC works without a GOOGLE_API_KEY.
     """
     extra_env: dict[str, str] = {}
     tmp_files: list[Path] = []
@@ -636,13 +633,10 @@ def _subprocess_env() -> tuple[dict[str, str], list[Path]]:
                     extra_env.setdefault("GOOGLE_CLOUD_PROJECT", project_id)
                     extra_env.setdefault("VERTEXAI_PROJECT", project_id)
                     extra_env.setdefault("VERTEXAI_LOCATION", "us-central1")
-            except Exception:
-                pass
+            except json.JSONDecodeError as exc:
+                log.warning("could not parse GCP service account JSON: %s", exc)
         except Exception as exc:
-            print(
-                f"WARNING: could not write GCP credentials temp file: {exc}",
-                file=sys.stderr,
-            )
+            log.warning("could not write GCP credentials temp file: %s", exc)
 
     return extra_env, tmp_files
 
@@ -662,7 +656,7 @@ def _run_lightspeed(
         "--output-dir",
         str(output_dir),
     ]
-    print(f"[eval] Running: {' '.join(full_cmd)}", flush=True)
+    log.info("invoking lightspeed-eval scorer")
 
     extra_env, tmp_files = _subprocess_env()
     env = {**os.environ, **extra_env} if extra_env else None
@@ -676,20 +670,16 @@ def _run_lightspeed(
 # ── Summary ──────────────────────────────────────────────────────────────────
 
 
-def _print_summary(output_dir: Path) -> None:
+def _log_summary(output_dir: Path) -> None:
     candidates = list(output_dir.glob("*_summary.json"))
     if not candidates:
-        print(f"\n[eval] Report written to {output_dir.resolve()}/")
+        log.info("report written to %s", output_dir.resolve())
         return
     try:
         summary = json.loads(candidates[0].read_text())
     except Exception:
-        print(f"\n[eval] Report written to {output_dir.resolve()}/")
+        log.info("report written to %s", output_dir.resolve())
         return
-
-    print("\n" + "=" * 62)
-    print("LIGHTSPEED EVAL SUMMARY")
-    print("=" * 62)
 
     stats_block = summary.get("summary_stats", summary)
     overall = stats_block.get("overall", {})
@@ -697,7 +687,7 @@ def _print_summary(output_dir: Path) -> None:
         total = overall.get("TOTAL", overall.get("total", "?"))
         passed = overall.get("PASS", overall.get("passed", "?"))
         rate = overall.get("pass_rate", 0)
-        print(f"Overall: {passed}/{total} passed  ({rate:.0f}%)")
+        log.info("overall: %s/%s passed (%.0f%%)", passed, total, rate)
 
     # Build threshold lookup from per-result data
     thresholds: dict[str, float | None] = {}
@@ -707,28 +697,33 @@ def _print_summary(output_dir: Path) -> None:
             thresholds[metric] = r.get("threshold")
 
     per_metric = stats_block.get("by_metric", summary.get("per_metric", {}))
-    if per_metric:
-        print("\nPer-metric breakdown:")
-        for metric, mstats in per_metric.items():
-            rate = mstats.get("pass_rate", 0)
-            passed = mstats.get("pass", mstats.get("passed", "?"))
-            total = (mstats.get("pass", 0) + mstats.get("fail", 0)) or mstats.get(
-                "total", "?"
-            )
-            threshold = thresholds.get(metric)
-            threshold_str = f"  threshold={threshold}" if threshold is not None else ""
-            mark = (
-                "✓"
-                if isinstance(rate, (int, float))
-                and (threshold is None or rate / 100 >= threshold)
-                else "✗"
-            )
-            print(
-                f"  {mark} {metric:<48} {passed}/{total}  ({rate:.0f}%){threshold_str}"
-            )
+    for metric, mstats in per_metric.items():
+        rate = mstats.get("pass_rate", 0)
+        passed = mstats.get("pass", mstats.get("passed", "?"))
+        total = (mstats.get("pass", 0) + mstats.get("fail", 0)) or mstats.get(
+            "total", "?"
+        )
+        threshold = thresholds.get(metric)
+        passed_threshold = threshold is None or (
+            isinstance(rate, (int, float)) and rate / 100 >= threshold
+        )
+        log.info(
+            "metric %-48s %s/%s (%.0f%%)%s",
+            metric,
+            passed,
+            total,
+            rate,
+            f" threshold={threshold}" if threshold is not None else "",
+        ) if passed_threshold else log.warning(
+            "metric %-48s %s/%s (%.0f%%) BELOW threshold=%s",
+            metric,
+            passed,
+            total,
+            rate,
+            threshold,
+        )
 
-    print("=" * 62)
-    print(f"Full report: {output_dir.resolve()}/")
+    log.info("full report: %s", output_dir.resolve())
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -740,8 +735,8 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--agent-url",
-        default=os.environ.get("AGENT_URL", DEFAULT_AGENT_URL),
-        help="Agent base URL (default: $AGENT_URL or http://localhost:5002)",
+        default=os.environ.get("AGENT_HOST", DEFAULT_AGENT_URL),
+        help="Agent base URL (default: $AGENT_HOST or http://localhost:5002)",
     )
     p.add_argument(
         "--eval-data",
@@ -759,7 +754,10 @@ def _parse_args() -> argparse.Namespace:
         help="Bearer token (or set AGENT_AUTH_TOKEN env var)",
     )
     p.add_argument(
-        "--timeout", type=int, default=120, help="Per-turn timeout in seconds"
+        "--timeout",
+        type=int,
+        default=300,
+        help="Per-turn timeout in seconds (increase for parallel runs or HITL-heavy evals)",
     )
     return p.parse_args()
 
@@ -770,10 +768,10 @@ def main() -> None:
 
     for path in args.eval_data:
         if not path.exists():
-            print(f"ERROR: eval data not found: {path}", file=sys.stderr)
+            log.error("eval data not found: %s", path)
             sys.exit(1)
     if not args.system.exists():
-        print(f"ERROR: system config not found: {args.system}", file=sys.stderr)
+        log.error("system config not found: %s", args.system)
         sys.exit(1)
 
     if (
@@ -781,36 +779,35 @@ def main() -> None:
         and not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_CONTENT")
         and not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
     ):
-        print(
-            "WARNING: no Google credentials found (GOOGLE_API_KEY / GOOGLE_APPLICATION_CREDENTIALS_CONTENT) — scoring may fail.",
-            file=sys.stderr,
-        )
+        log.warning("no Google credentials found — scoring may fail")
 
     lightspeed_cmd = _find_lightspeed_cmd()
     if lightspeed_cmd is None:
-        print(
-            "ERROR: lightspeed-eval not found. Install it with:\n"
-            '  pip install "lightspeed-evaluation @ git+https://github.com/lightspeed-core/lightspeed-evaluation.git@v0.7.0"',
-            file=sys.stderr,
+        log.error(
+            "lightspeed-eval not found. Install: "
+            'pip install "lightspeed-evaluation @ git+https://github.com/lightspeed-core/lightspeed-evaluation.git@v0.7.0"'
         )
         sys.exit(1)
 
-    eval_files_str = ", ".join(str(p) for p in args.eval_data)
-    print(f"[eval] Agent URL : {args.agent_url}")
-    print(f"[eval] Eval data : {eval_files_str}")
-    print(f"[eval] System    : {args.system}")
-    print(f"[eval] Output    : {args.output_dir}")
+    log.info(
+        "starting eval agent=%s eval_files=%d system=%s output=%s",
+        args.agent_url,
+        len(args.eval_data),
+        args.system.name,
+        args.output_dir,
+    )
 
     eval_data: list[dict[str, Any]] = []
     for path in args.eval_data:
         eval_data.extend(yaml.safe_load(path.read_text()))
 
-    print("\n[eval] Collecting live agent responses …")
+    log.info("collecting live agent responses for %d group(s)", len(eval_data))
     populated = _populate_dataset(
         eval_data,
         agent_url=args.agent_url,
         auth_token=args.auth_token,
         timeout=args.timeout,
+        max_workers=10,
     )
 
     with tempfile.NamedTemporaryFile(
@@ -820,19 +817,19 @@ def main() -> None:
         tmp_path = Path(tmp.name)
 
     try:
-        print("\n[eval] Running Lightspeed scoring …", flush=True)
+        log.info("running lightspeed-eval scorer")
         exit_code = _run_lightspeed(
             args.system, tmp_path, args.output_dir, lightspeed_cmd
         )
     finally:
         tmp_path.unlink(missing_ok=True)
 
-    _print_summary(args.output_dir)
+    _log_summary(args.output_dir)
 
     if exit_code != 0:
-        print(f"\n[eval] FAILED — lightspeed-eval exited {exit_code}", file=sys.stderr)
+        log.error("eval FAILED — lightspeed-eval exited %d", exit_code)
     else:
-        print("\n[eval] PASSED — all metric thresholds met.")
+        log.info("eval PASSED — all metric thresholds met")
 
     sys.exit(exit_code)
 

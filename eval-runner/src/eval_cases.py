@@ -105,6 +105,7 @@ def _index_path(eval_data_dir: str) -> Path:
 def _load_cases(eval_data_dir: str) -> list[dict[str, Any]]:
     p = _cases_path(eval_data_dir)
     if not p.exists():
+        log.warning("eval_cases file not found: %s", p)
         return []
     return yaml.safe_load(p.read_text()) or []
 
@@ -284,6 +285,7 @@ def list_cases(eval_data_dir: str) -> list[dict[str, Any]]:
                 "metrics": turns[0].get("turn_metrics", []) if turns else [],
             }
         )
+    log.info("list_cases: returned %d cases from %s", len(result), eval_data_dir)
     return result
 
 
@@ -292,6 +294,7 @@ def delete_case(eval_data_dir: str, case_id: str) -> bool:
     index = _load_index(eval_data_dir)
     conv_id = index.get(case_id)
     if not conv_id:
+        log.warning("delete_case: case_id=%s not found in index", case_id)
         return False
 
     cases = _load_cases(eval_data_dir)
