@@ -156,7 +156,9 @@ def _find_eval_files(pattern: str | None) -> list[Path]:
 
     if pattern is None:
         # One temp file per tag — preserves ordering within each tag
-        tags = list(dict.fromkeys(c.get("tag") for c in cases if c.get("tag")))
+        tags: list[str] = list(
+            dict.fromkeys(str(c["tag"]) for c in cases if c.get("tag"))
+        )
         if not tags:
             log.warning(
                 "No tags found in eval cases — running full file as single batch"

@@ -110,6 +110,32 @@ def _load_cases(eval_data_dir: str) -> list[dict[str, Any]]:
     return yaml.safe_load(p.read_text()) or []
 
 
+def load_cases(path: str | Path) -> list[dict[str, Any]]:
+    """Load cases from eval_cases.yaml, normalizing keyword fields at read time.
+
+    Accepts a file path or a directory (in which case eval_cases.yaml is appended).
+    """
+    p = Path(path)
+    if p.is_dir():
+        p = p / CASES_FILE
+    if not p.exists():
+        log.warning("eval_cases file not found: %s", p)
+        return []
+    cases = yaml.safe_load(p.read_text()) or []
+    for conv in cases:
+        for turn in conv.get("turns", []):
+            if "expected_keywords" in turn:
+                turn["expected_keywords"] = _normalize_keywords(
+                    turn["expected_keywords"]
+                )
+    return cases
+
+
+def filter_cases_by_tag(path: str | Path, tag: str) -> list[dict[str, Any]]:
+    """Return all conversations matching the given tag."""
+    return [c for c in load_cases(path) if c.get("tag") == tag]
+
+
 def _save_cases(eval_data_dir: str, cases: list[dict[str, Any]]) -> None:
     # Dump each conversation group separately with a blank line between them
     header = "# Managed by eval sidecar — use POST /evals/cases to add cases.\n\n"
@@ -307,8 +333,3 @@ def delete_case(eval_data_dir: str, case_id: str) -> bool:
     _save_index(eval_data_dir, index)
     log.info("Deleted case %s (conv=%s)", case_id, conv_id)
     return True
-
-
-def filter_cases_by_tag(eval_data_dir: str, tag: str) -> list[dict[str, Any]]:
-    """Return all conversations matching the given tag."""
-    return [c for c in _load_cases(eval_data_dir) if c.get("tag") == tag]

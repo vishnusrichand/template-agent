@@ -82,6 +82,7 @@ known-first-party = ["src"]
 [tool.mypy]
 python_version = "3.12"
 ignore_missing_imports = true
+mypy_path = ["eval-runner/src"]
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
 check_untyped_defs = true

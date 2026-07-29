@@ -30,7 +30,7 @@ repos:
       - id: mypy
         args: [--ignore-missing-imports]
         additional_dependencies: [types-requests, types-PyYAML, types-cachetools]
-        exclude: ^(tests/|eval-runner/)
+        exclude: ^(tests/|eval-runner/tests/)
 
 
   - repo: https://github.com/PyCQA/pydocstyle
