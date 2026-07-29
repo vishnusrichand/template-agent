@@ -146,6 +146,10 @@ def test_write_eval_result_uses_defaults_when_org_omitted(mock_psycopg2_conn):
     with patch("eval_postgres._get_conn", return_value=conn):
         eval_postgres.write_eval_result(passed=1, failed=0, errors=0, eval_score=1.0)
     cursor.execute.assert_called_once()
+    args = cursor.execute.call_args[0][1]
+    assert args[9] == eval_postgres.AGENT_ORG
+    assert args[10] == eval_postgres.AGENT_NAME
+    assert args[11] == eval_postgres._get_config_hash()
 
 
 def test_write_eval_result_serialises_results_detail(mock_psycopg2_conn):
