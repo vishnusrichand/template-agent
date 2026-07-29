@@ -158,12 +158,14 @@ def ensure_table() -> None:
         return
     try:
         conn = _get_conn()
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(_CREATE_TABLE)
-                for migration in _MIGRATIONS:
-                    cur.execute(migration)
-        conn.close()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(_CREATE_TABLE)
+                    for migration in _MIGRATIONS:
+                        cur.execute(migration)
+        finally:
+            conn.close()
         _table_ensured = True
         log.info("eval_postgres_tables_ready: evals + evaluation_results verified")
     except Exception as exc:
@@ -196,49 +198,49 @@ def write_eval_result(
     try:
         conn = _get_conn()
         now = datetime.now(UTC)
-
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE evals
-                    SET eval_status   = 'completed',
-                        ls_run_ids    = %s,
-                        eval_score    = %s,
-                        pass          = %s,
-                        fail          = %s,
-                        error         = %s,
-                        judge_model   = %s,
-                        results_detail = %s,
-                        updated_at    = %s,
-                        completed_at  = %s
-                    WHERE id = (
-                        SELECT id FROM evals
-                        WHERE org = %s AND name = %s AND config_hash = %s
-                          AND eval_status IN ('in_progress', 'error')
-                        ORDER BY created_at DESC
-                        LIMIT 1
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE evals
+                        SET eval_status   = 'completed',
+                            ls_run_ids    = %s,
+                            eval_score    = %s,
+                            pass          = %s,
+                            fail          = %s,
+                            error         = %s,
+                            judge_model   = %s,
+                            results_detail = %s,
+                            updated_at    = %s,
+                            completed_at  = %s
+                        WHERE id = (
+                            SELECT id FROM evals
+                            WHERE org = %s AND name = %s AND config_hash = %s
+                              AND eval_status IN ('in_progress', 'error')
+                            ORDER BY created_at DESC
+                            LIMIT 1
+                        )
+                        RETURNING id
+                        """,
+                        (
+                            ls_run_ids,
+                            eval_score,
+                            passed,
+                            failed,
+                            errors,
+                            judge_model,
+                            json.dumps(results_detail) if results_detail else None,
+                            now,
+                            now,
+                            effective_org,
+                            effective_name,
+                            effective_hash,
+                        ),
                     )
-                    RETURNING id
-                    """,
-                    (
-                        ls_run_ids,
-                        eval_score,
-                        passed,
-                        failed,
-                        errors,
-                        judge_model,
-                        json.dumps(results_detail) if results_detail else None,
-                        now,
-                        now,
-                        effective_org,
-                        effective_name,
-                        effective_hash,
-                    ),
-                )
-                row = cur.fetchone()
-
-        conn.close()
+                    row = cur.fetchone()
+        finally:
+            conn.close()
 
         if row:
             log.info(
@@ -275,26 +277,19 @@ def load_results_since(run_started_at: datetime) -> dict[str, Any]:
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
-                    "SELECT DISTINCT run_id FROM evaluation_results WHERE timestamp >= %s",
+                    "SELECT * FROM evaluation_results WHERE timestamp >= %s",
                     (run_started_at,),
-                )
-                run_id_rows = cur.fetchall()
-                if not run_id_rows:
-                    log.warning(
-                        "No evaluation_results rows found since %s", run_started_at
-                    )
-                    return {}
-
-                run_ids = [r["run_id"] for r in run_id_rows]
-                log.info("Loading DB results for run_ids=%s", run_ids)
-
-                cur.execute(
-                    "SELECT * FROM evaluation_results WHERE run_id = ANY(%s)",
-                    (run_ids,),
                 )
                 raw_rows = cur.fetchall()
         finally:
             conn.close()
+
+        if not raw_rows:
+            log.warning("No evaluation_results rows found since %s", run_started_at)
+            return {}
+
+        run_ids = list(dict.fromkeys(r["run_id"] for r in raw_rows))
+        log.info("Loading DB results for run_ids=%s", run_ids)
     except Exception as exc:
         log.warning("load_results_since_failed (%s): %s", type(exc).__name__, exc)
         return {}
@@ -307,6 +302,7 @@ def load_results_since(run_started_at: datetime) -> dict[str, Any]:
         lambda: {"pass": 0, "fail": 0}
     )
 
+    turns: list[dict[str, Any]] = []
     for r in raw_rows:
         result_val = str(r.get("result") or "").upper()
         if result_val not in overall_counts:
@@ -328,6 +324,19 @@ def load_results_since(run_started_at: datetime) -> dict[str, Any]:
             by_conversation[conv_id]["pass"] += 1
         elif result_val == "FAIL":
             by_conversation[conv_id]["fail"] += 1
+
+        turns.append(
+            {
+                k: (
+                    v.isoformat()
+                    if isinstance(v, datetime)
+                    else str(v)
+                    if isinstance(v, float)
+                    else v
+                )
+                for k, v in r.items()
+            }
+        )
 
     total = len(raw_rows)
     overall_with_rates: dict[str, Any] = dict(overall_counts)
@@ -359,35 +368,27 @@ def load_results_since(run_started_at: datetime) -> dict[str, Any]:
         },
     }
 
-    turns: list[dict[str, Any]] = []
-    for r in raw_rows:
-        turn: dict[str, Any] = {}
-        for k, v in r.items():
-            if isinstance(v, datetime):
-                turn[k] = v.isoformat()
-            elif isinstance(v, float):
-                turn[k] = str(v)
-            else:
-                turn[k] = v
-        turns.append(turn)
-
     return {"turns": turns, "summary": summary, "ls_run_ids": run_ids}
 
 
 def get_results_by_run_id(run_id: str) -> list[dict[str, Any]]:
     """Return per-turn rows for a specific run_id. Returns [] if not found."""
     log.info("get_results_by_run_id: run_id=%s", run_id)
-    conn = _get_conn()
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT conversation_group_id, turn_id, metric_identifier, result, score, reason "
-                "FROM evaluation_results WHERE run_id = %s ORDER BY id",
-                (run_id,),
-            )
-            cols = [d[0] for d in cur.description]
-            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
-    finally:
-        conn.close()
+        conn = _get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT conversation_group_id, turn_id, metric_identifier, result, score, reason "
+                    "FROM evaluation_results WHERE run_id = %s ORDER BY id",
+                    (run_id,),
+                )
+                cols = [d[0] for d in cur.description]
+                rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        finally:
+            conn.close()
+    except Exception as exc:
+        log.error("get_results_by_run_id failed (%s): %s", type(exc).__name__, exc)
+        raise
     log.info("get_results_by_run_id: run_id=%s returned %d rows", run_id, len(rows))
     return rows

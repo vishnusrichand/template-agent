@@ -6,6 +6,7 @@ Cases are indexed by case_id in .cases_index.json for fast lookup.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import uuid
@@ -18,40 +19,6 @@ log = logging.getLogger(__name__)
 
 CASES_FILE = "eval_cases.yaml"
 INDEX_FILE = ".cases_index.json"
-
-# ── Supported metrics registry ────────────────────────────────────────────────
-
-SUPPORTED_METRICS: dict[str, Any] = {
-    "turn_level": {
-        "ragas": [
-            "faithfulness",
-            "response_relevancy",
-            "context_recall",
-            "context_relevance",
-            "context_utilization",
-            "context_precision",
-        ],
-        "custom": [
-            "answer_correctness",
-            "intent_eval",
-            "keywords_eval",
-            "tool_eval",
-            "proposal_status",
-            "proposal_evaluation_correctness",
-        ],
-        "nlp": ["bleu", "rouge", "semantic_similarity_distance"],
-        "geval": ["<user-defined — add criteria in system.yaml metrics_metadata>"],
-        "script": ["action_eval"],
-    },
-    "conversation_level": {
-        "deepeval": [
-            "conversation_completeness",
-            "conversation_relevancy",
-            "knowledge_retention",
-        ],
-        "geval": ["<user-defined>"],
-    },
-}
 
 # ── Default metrics per tag ───────────────────────────────────────────────────
 
@@ -86,9 +53,27 @@ _DEFAULT_FALLBACK: dict[str, Any] = {
 
 def get_defaults_for_tag(tag: str) -> dict[str, Any]:
     """Return a copy of the default metric config for the given tag."""
-    import copy
-
     return copy.deepcopy(_DEFAULT_METRICS.get(tag, _DEFAULT_FALLBACK))
+
+
+# ── Keyword normalization ─────────────────────────────────────────────────────
+
+
+def _normalize_keywords(keywords: list | str) -> list[list[str]]:
+    """Normalize keywords to list[list[str]] (the format lightspeed-eval expects).
+
+    Accepts:
+        "22.9, Normal"                → [["22.9"], ["Normal"]]
+        ["22.9", "Normal"]            → [["22.9"], ["Normal"]]
+        [["22.9", "22.8"], ["Normal"]] → used as-is (full control)
+    """
+    if isinstance(keywords, str):
+        return [[kw.strip()] for kw in keywords.split(",") if kw.strip()]
+    if isinstance(keywords, list) and keywords:
+        if isinstance(keywords[0], list):
+            return keywords
+        return [[str(kw)] for kw in keywords]
+    return keywords
 
 
 # ── File helpers ──────────────────────────────────────────────────────────────
@@ -136,6 +121,9 @@ def filter_cases_by_tag(path: str | Path, tag: str) -> list[dict[str, Any]]:
     return [c for c in load_cases(path) if c.get("tag") == tag]
 
 
+# ── CRUD helpers ──────────────────────────────────────────────────────────────
+
+
 def _save_cases(eval_data_dir: str, cases: list[dict[str, Any]]) -> None:
     # Dump each conversation group separately with a blank line between them
     header = "# Managed by eval sidecar — use POST /evals/cases to add cases.\n\n"
@@ -160,25 +148,6 @@ def _save_index(eval_data_dir: str, index: dict[str, str]) -> None:
 
 
 # ── Case CRUD ─────────────────────────────────────────────────────────────────
-
-
-def _normalize_keywords(keywords: list | str) -> list[list[str]]:
-    """Normalize keywords to list[list[str]] (the format lightspeed-eval expects).
-
-    Accepts:
-        "22.9, Normal"              → [["22.9"], ["Normal"]]
-        ["22.9", "Normal"]          → [["22.9"], ["Normal"]]
-        [["22.9","22.8"], ["Normal"]] → used as-is (full control)
-    """
-    if isinstance(keywords, str):
-        return [[kw.strip()] for kw in keywords.split(",") if kw.strip()]
-    if isinstance(keywords, list) and keywords:
-        # Already nested list-of-lists?
-        if isinstance(keywords[0], list):
-            return keywords
-        # Flat list of strings → each becomes its own mandatory group
-        return [[str(kw)] for kw in keywords]
-    return keywords
 
 
 def create_case(

@@ -93,10 +93,6 @@ spec:
                   key: VLLM_API_KEY
                   optional: true
 
-            # S3 result upload (optional — leave EVAL_S3_BUCKET empty to disable)
-            - name: EVAL_S3_BUCKET
-              value: ""
-
           securityContext:
             runAsNonRoot: true
             allowPrivilegeEscalation: false

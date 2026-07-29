@@ -672,17 +672,7 @@ def _run_lightspeed(
 # ── Summary ──────────────────────────────────────────────────────────────────
 
 
-def _log_summary(output_dir: Path) -> None:
-    candidates = list(output_dir.glob("*_summary.json"))
-    if not candidates:
-        log.info("report written to %s", output_dir.resolve())
-        return
-    try:
-        summary = json.loads(candidates[0].read_text())
-    except Exception:
-        log.info("report written to %s", output_dir.resolve())
-        return
-
+def _log_one_summary(summary: dict[str, Any]) -> None:
     stats_block = summary.get("summary_stats", summary)
     overall = stats_block.get("overall", {})
     if overall:
@@ -691,7 +681,6 @@ def _log_summary(output_dir: Path) -> None:
         rate = overall.get("pass_rate", 0)
         log.info("overall: %s/%s passed (%.0f%%)", passed, total, rate)
 
-    # Build threshold lookup from per-result data
     thresholds: dict[str, float | None] = {}
     for r in summary.get("results", []):
         metric = r.get("metric_identifier", "")
@@ -709,7 +698,7 @@ def _log_summary(output_dir: Path) -> None:
         passed_threshold = threshold is None or (
             isinstance(rate, (int, float)) and rate / 100 >= threshold
         )
-        log.info(
+        log.debug(
             "metric %-48s %s/%s (%.0f%%)%s",
             metric,
             passed,
@@ -725,6 +714,25 @@ def _log_summary(output_dir: Path) -> None:
             threshold,
         )
 
+
+def _log_summary(output_dir: Path) -> None:
+    candidates = list(output_dir.glob("*_summary.json"))
+    if not candidates:
+        log.info("report written to %s", output_dir.resolve())
+        return
+    if len(candidates) > 1:
+        log.info("logging summary for %d files in %s", len(candidates), output_dir)
+    for candidate in candidates:
+        try:
+            summary = json.loads(candidate.read_text())
+        except Exception:
+            log.warning(
+                "failed to parse summary %s — raw output in %s",
+                candidate.name,
+                output_dir.resolve(),
+            )
+            continue
+        _log_one_summary(summary)
     log.info("full report: %s", output_dir.resolve())
 
 

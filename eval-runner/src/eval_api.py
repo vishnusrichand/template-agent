@@ -17,12 +17,12 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import os
 import subprocess
 import sys
 import tempfile
+from collections import defaultdict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -30,7 +30,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from eval_cases import filter_cases_by_tag, load_cases
+from eval_cases import load_cases
+from eval_postgres import _compute_config_hash
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -55,8 +56,8 @@ def _resolve_config_dir() -> str:
         return val
     here = Path(__file__).resolve().parent
     for candidate in [
-        here.parent / "config" / "agent",
-        here / ".." / "config" / "agent",
+        here.parent.parent / "config" / "agent",  # repo-root/config/agent (local dev)
+        here.parent / "config" / "agent",  # eval-runner/config/agent (container)
     ]:
         resolved = candidate.resolve()
         if resolved.is_dir():
@@ -85,29 +86,6 @@ EVAL_OUTPUT_DIR = Path(
 
 AGENT_ORG = os.environ.get("AI_PLATFORM_AGENT_ORG", "default")
 AGENT_NAME = os.environ.get("AI_PLATFORM_AGENT_NAME", "agent")
-
-
-_HASH_EXTENSIONS = {".md", ".yaml", ".json"}
-_HASH_EXCLUDE_DIRS = {"evals", "deployment"}
-
-
-def _compute_config_hash(config_dir: str) -> str:
-    """SHA256 of behavior-relevant config files (prompts, skills, runtime, tools)."""
-    h = hashlib.sha256()
-    base = Path(config_dir)
-    if base.exists():
-        for fpath in sorted(base.rglob("*")):
-            if not fpath.is_file():
-                continue
-            if fpath.suffix not in _HASH_EXTENSIONS:
-                continue
-            if any(
-                part in _HASH_EXCLUDE_DIRS for part in fpath.relative_to(base).parts
-            ):
-                continue
-            h.update(str(fpath.relative_to(base)).encode())
-            h.update(fpath.read_bytes())
-    return h.hexdigest()[:16]  # 16-char prefix is enough
 
 
 AGENT_CONFIG_HASH = os.environ.get("AGENT_CONFIG_HASH") or _compute_config_hash(
@@ -155,19 +133,20 @@ def _find_eval_files(pattern: str | None) -> list[Path]:
     log.info("Loaded %d eval cases from %s", len(cases), EVAL_CASES_PATH)
 
     if pattern is None:
-        # One temp file per tag — preserves ordering within each tag
-        tags: list[str] = list(
-            dict.fromkeys(str(c["tag"]) for c in cases if c.get("tag"))
-        )
-        if not tags:
+        # Group cases by tag in one pass, preserving insertion order
+        groups: dict[str, list] = defaultdict(list)
+        for c in cases:
+            tag = c.get("tag")
+            if tag:
+                groups[tag].append(c)
+        if not groups:
             log.warning(
                 "No tags found in eval cases — running full file as single batch"
             )
             return [EVAL_CASES_PATH]
-        log.info("Splitting cases into %d tag batches: %s", len(tags), tags)
+        log.info("Splitting cases into %d tag batches: %s", len(groups), list(groups))
         files: list[Path] = []
-        for tag in tags:
-            filtered = filter_cases_by_tag(EVAL_CASES_PATH, tag)
+        for tag, filtered in groups.items():
             tmp = tempfile.NamedTemporaryFile(
                 mode="w", suffix=".yaml", prefix=f"eval_{tag}_", delete=False
             )
@@ -178,7 +157,7 @@ def _find_eval_files(pattern: str | None) -> list[Path]:
         return files
 
     # Specific pattern — single filtered temp file
-    filtered = filter_cases_by_tag(EVAL_CASES_PATH, pattern)
+    filtered = [c for c in cases if c.get("tag") == pattern]
     if not filtered:
         raise FileNotFoundError(
             f"No eval cases found for pattern '{pattern}'. "

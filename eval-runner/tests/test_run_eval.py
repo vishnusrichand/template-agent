@@ -1,4 +1,5 @@
 """Tests for run_eval.py — SSE parsing, agent interaction helpers."""
+
 from __future__ import annotations
 
 import json
@@ -13,6 +14,7 @@ import run_eval
 
 # ── _parse_sse_stream ─────────────────────────────────────────────────────────
 
+
 def test_parse_sse_stream_single_event():
     lines = ["event: updates", 'data: {"key": "value"}', ""]
     events = run_eval._parse_sse_stream(lines)
@@ -22,8 +24,12 @@ def test_parse_sse_stream_single_event():
 
 def test_parse_sse_stream_multiple_events():
     lines = [
-        "event: updates", 'data: {"a": 1}', "",
-        "event: events", 'data: {"b": 2}', "",
+        "event: updates",
+        'data: {"a": 1}',
+        "",
+        "event: events",
+        'data: {"b": 2}',
+        "",
     ]
     events = run_eval._parse_sse_stream(lines)
     assert len(events) == 2
@@ -65,6 +71,7 @@ def test_parse_sse_stream_blank_line_without_data():
 
 # ── _extract_text ─────────────────────────────────────────────────────────────
 
+
 def test_extract_text_plain_string():
     assert run_eval._extract_text("hello world") == "hello world"
 
@@ -96,6 +103,7 @@ def test_extract_text_unrecognised_type():
 
 # ── _resolve_tool_name ────────────────────────────────────────────────────────
 
+
 def test_resolve_tool_name_direct():
     tc = {"name": "calculate_bmi", "args": {}}
     assert run_eval._resolve_tool_name(tc) == "calculate_bmi"
@@ -113,6 +121,7 @@ def test_resolve_tool_name_task_without_subagent_type():
 
 # ── _unwrap_update_data ───────────────────────────────────────────────────────
 
+
 def test_unwrap_subgraph_list_format():
     data = [["ns1", "ns2"], {"agent": {"messages": []}}]
     assert run_eval._unwrap_update_data(data) == {"agent": {"messages": []}}
@@ -129,6 +138,7 @@ def test_unwrap_other_returns_empty():
 
 
 # ── _extract_node_updates ─────────────────────────────────────────────────────
+
 
 def test_extract_node_updates_top_level_dict():
     data = {"agent": {"messages": [{"type": "ai", "content": "hi"}]}}
@@ -150,6 +160,7 @@ def test_extract_node_updates_invalid_returns_empty():
 
 
 # ── _has_interrupt ────────────────────────────────────────────────────────────
+
 
 def test_has_interrupt_true():
     events = [("updates", {"__interrupt__": [{"value": {"action_requests": []}}]})]
@@ -177,10 +188,11 @@ def test_has_interrupt_skips_non_updates_events():
 
 # ── _count_interrupted_tool_calls ─────────────────────────────────────────────
 
+
 def test_count_interrupted_tool_calls_two():
-    events = [("updates", {
-        "__interrupt__": [{"value": {"action_requests": ["a", "b"]}}]
-    })]
+    events = [
+        ("updates", {"__interrupt__": [{"value": {"action_requests": ["a", "b"]}}]})
+    ]
     assert run_eval._count_interrupted_tool_calls(events) == 2
 
 
@@ -204,6 +216,7 @@ def test_count_interrupted_tool_calls_skips_non_updates():
 
 # ── _last_nonempty ────────────────────────────────────────────────────────────
 
+
 def test_last_nonempty_returns_last_non_blank():
     assert run_eval._last_nonempty(["", "first", "last", ""]) == "last"
 
@@ -221,6 +234,7 @@ def test_last_nonempty_single_entry():
 
 
 # ── _headers ──────────────────────────────────────────────────────────────────
+
 
 def test_headers_with_token():
     h = run_eval._headers("tok123")
@@ -241,11 +255,19 @@ def test_headers_with_empty_string():
 
 # ── _collect_from_events ──────────────────────────────────────────────────────
 
+
 def test_collect_from_events_ai_message():
     events = [
-        ("updates", {"agent": {"messages": [
-            {"type": "ai", "content": "BMI is 22.9", "tool_calls": []}
-        ]}})
+        (
+            "updates",
+            {
+                "agent": {
+                    "messages": [
+                        {"type": "ai", "content": "BMI is 22.9", "tool_calls": []}
+                    ]
+                }
+            },
+        )
     ]
     texts, tcs, ctxs = run_eval._collect_from_events(events)
     assert "BMI is 22.9" in texts
@@ -253,8 +275,15 @@ def test_collect_from_events_ai_message():
 
 def test_collect_from_events_tool_start_event():
     events = [
-        ("events", {"event": "on_tool_start", "name": "calculate_bmi",
-                    "run_id": "r1", "data": {"input": {"weight": 70}}})
+        (
+            "events",
+            {
+                "event": "on_tool_start",
+                "name": "calculate_bmi",
+                "run_id": "r1",
+                "data": {"input": {"weight": 70}},
+            },
+        )
     ]
     texts, tcs, ctxs = run_eval._collect_from_events(events)
     assert any(tc["tool_name"] == "calculate_bmi" for tc in tcs)
@@ -262,8 +291,15 @@ def test_collect_from_events_tool_start_event():
 
 def test_collect_from_events_internal_tools_excluded():
     events = [
-        ("events", {"event": "on_tool_start", "name": "write_todos",
-                    "run_id": "r2", "data": {"input": {}}})
+        (
+            "events",
+            {
+                "event": "on_tool_start",
+                "name": "write_todos",
+                "run_id": "r2",
+                "data": {"input": {}},
+            },
+        )
     ]
     texts, tcs, ctxs = run_eval._collect_from_events(events)
     assert tcs == []
@@ -271,30 +307,41 @@ def test_collect_from_events_internal_tools_excluded():
 
 def test_collect_from_events_tool_result_captured_as_context():
     events = [
-        ("updates", {"agent": {"messages": [
-            {"type": "tool", "content": "BMI result: 22.9"}
-        ]}})
+        (
+            "updates",
+            {"agent": {"messages": [{"type": "tool", "content": "BMI result: 22.9"}]}},
+        )
     ]
     texts, tcs, ctxs = run_eval._collect_from_events(events)
     assert "BMI result: 22.9" in ctxs
 
 
 def test_collect_from_events_tool_message_with_empty_content():
-    events = [
-        ("updates", {"agent": {"messages": [
-            {"type": "tool", "content": ""}
-        ]}})
-    ]
+    events = [("updates", {"agent": {"messages": [{"type": "tool", "content": ""}]}})]
     texts, tcs, ctxs = run_eval._collect_from_events(events)
     assert ctxs == []
 
 
 def test_collect_from_events_deduplicates_tool_calls_by_run_id():
     events = [
-        ("events", {"event": "on_tool_start", "name": "calc",
-                    "run_id": "dup", "data": {"input": {}}}),
-        ("events", {"event": "on_tool_start", "name": "calc",
-                    "run_id": "dup", "data": {"input": {}}}),
+        (
+            "events",
+            {
+                "event": "on_tool_start",
+                "name": "calc",
+                "run_id": "dup",
+                "data": {"input": {}},
+            },
+        ),
+        (
+            "events",
+            {
+                "event": "on_tool_start",
+                "name": "calc",
+                "run_id": "dup",
+                "data": {"input": {}},
+            },
+        ),
     ]
     texts, tcs, ctxs = run_eval._collect_from_events(events)
     assert len(tcs) == 1
@@ -307,11 +354,22 @@ def test_collect_from_events_empty():
 
 def test_collect_from_events_ai_tool_calls_from_updates():
     events = [
-        ("updates", {"agent": {"messages": [
-            {"type": "ai", "content": "", "tool_calls": [
-                {"name": "calculate_bmi", "args": {"weight": 70}}
-            ]}
-        ]}})
+        (
+            "updates",
+            {
+                "agent": {
+                    "messages": [
+                        {
+                            "type": "ai",
+                            "content": "",
+                            "tool_calls": [
+                                {"name": "calculate_bmi", "args": {"weight": 70}}
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
     ]
     texts, tcs, ctxs = run_eval._collect_from_events(events)
     assert any(tc["tool_name"] == "calculate_bmi" for tc in tcs)
@@ -319,9 +377,19 @@ def test_collect_from_events_ai_tool_calls_from_updates():
 
 def test_collect_from_events_stream_mode_list_wrapper():
     events = [
-        ("updates", ["updates", {"agent": {"messages": [
-            {"type": "ai", "content": "wrapped", "tool_calls": []}
-        ]}}])
+        (
+            "updates",
+            [
+                "updates",
+                {
+                    "agent": {
+                        "messages": [
+                            {"type": "ai", "content": "wrapped", "tool_calls": []}
+                        ]
+                    }
+                },
+            ],
+        )
     ]
     texts, tcs, ctxs = run_eval._collect_from_events(events)
     assert "wrapped" in texts
@@ -330,7 +398,10 @@ def test_collect_from_events_stream_mode_list_wrapper():
 def test_collect_from_events_skips_invalid_update_and_message():
     events = [
         ("updates", {"agent": "not-a-dict", "other": [1, 2]}),
-        ("updates", {"node": {"messages": ["not-a-dict", {"type": "tool", "content": ""}]}}),
+        (
+            "updates",
+            {"node": {"messages": ["not-a-dict", {"type": "tool", "content": ""}]}},
+        ),
     ]
     texts, tcs, ctxs = run_eval._collect_from_events(events)
     assert texts == tcs == ctxs == []
@@ -338,11 +409,20 @@ def test_collect_from_events_skips_invalid_update_and_message():
 
 def test_collect_from_events_excludes_internal_ai_tool_calls():
     events = [
-        ("updates", {"agent": {"messages": [
-            {"type": "ai", "content": "", "tool_calls": [
-                {"name": "write_todos", "args": {}}
-            ]}
-        ]}})
+        (
+            "updates",
+            {
+                "agent": {
+                    "messages": [
+                        {
+                            "type": "ai",
+                            "content": "",
+                            "tool_calls": [{"name": "write_todos", "args": {}}],
+                        }
+                    ]
+                }
+            },
+        )
     ]
     texts, tcs, ctxs = run_eval._collect_from_events(events)
     assert tcs == []
@@ -350,10 +430,24 @@ def test_collect_from_events_excludes_internal_ai_tool_calls():
 
 def test_collect_from_events_skips_duplicate_run_id():
     events = [
-        ("events", {"event": "on_tool_start", "name": "calc",
-                    "run_id": "seen", "data": {"input": {}}}),
-        ("events", {"event": "on_tool_start", "name": "other",
-                    "run_id": "seen", "data": {"input": {}}}),
+        (
+            "events",
+            {
+                "event": "on_tool_start",
+                "name": "calc",
+                "run_id": "seen",
+                "data": {"input": {}},
+            },
+        ),
+        (
+            "events",
+            {
+                "event": "on_tool_start",
+                "name": "other",
+                "run_id": "seen",
+                "data": {"input": {}},
+            },
+        ),
     ]
     texts, tcs, ctxs = run_eval._collect_from_events(events)
     assert len(tcs) == 1
@@ -367,8 +461,15 @@ def test_collect_from_events_non_tool_start_event_ignored():
 
 def test_collect_from_events_tool_start_without_run_id():
     events = [
-        ("events", {"event": "on_tool_start", "name": "calc",
-                    "run_id": "", "data": {"input": {"x": 1}}})
+        (
+            "events",
+            {
+                "event": "on_tool_start",
+                "name": "calc",
+                "run_id": "",
+                "data": {"input": {"x": 1}},
+            },
+        )
     ]
     texts, tcs, ctxs = run_eval._collect_from_events(events)
     assert len(tcs) == 1
@@ -376,8 +477,15 @@ def test_collect_from_events_tool_start_without_run_id():
 
 def test_collect_from_events_tool_start_non_dict_args():
     events = [
-        ("events", {"event": "on_tool_start", "name": "calc",
-                    "run_id": "r3", "data": {"input": "not-a-dict"}})
+        (
+            "events",
+            {
+                "event": "on_tool_start",
+                "name": "calc",
+                "run_id": "r3",
+                "data": {"input": "not-a-dict"},
+            },
+        )
     ]
     texts, tcs, ctxs = run_eval._collect_from_events(events)
     assert tcs == []
@@ -391,6 +499,7 @@ def test_collect_from_events_ignores_unknown_event_type():
 
 # ── _subprocess_env ───────────────────────────────────────────────────────────
 
+
 def test_subprocess_env_no_gcp_creds(monkeypatch):
     monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS_CONTENT", raising=False)
     monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
@@ -399,11 +508,13 @@ def test_subprocess_env_no_gcp_creds(monkeypatch):
 
 
 def test_subprocess_env_with_valid_gcp_json(monkeypatch):
-    sa = json.dumps({
-        "project_id": "my-proj",
-        "type": "service_account",
-        "client_email": "sa@my-proj.iam.gserviceaccount.com",
-    })
+    sa = json.dumps(
+        {
+            "project_id": "my-proj",
+            "type": "service_account",
+            "client_email": "sa@my-proj.iam.gserviceaccount.com",
+        }
+    )
     monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS_CONTENT", sa)
     monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
     extra_env, tmp_files = run_eval._subprocess_env()
@@ -438,7 +549,9 @@ def test_subprocess_env_handles_invalid_json_gracefully(monkeypatch, caplog):
 
 
 def test_subprocess_env_valid_json_without_project_id(monkeypatch):
-    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS_CONTENT", '{"type":"service_account"}')
+    monkeypatch.setenv(
+        "GOOGLE_APPLICATION_CREDENTIALS_CONTENT", '{"type":"service_account"}'
+    )
     monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
     extra_env, tmp_files = run_eval._subprocess_env()
     try:
@@ -452,7 +565,9 @@ def test_subprocess_env_valid_json_without_project_id(monkeypatch):
 def test_subprocess_env_write_failure(monkeypatch, caplog):
     monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS_CONTENT", '{"project_id":"x"}')
     monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
-    with patch("run_eval.tempfile.NamedTemporaryFile", side_effect=OSError("disk full")):
+    with patch(
+        "run_eval.tempfile.NamedTemporaryFile", side_effect=OSError("disk full")
+    ):
         extra_env, tmp_files = run_eval._subprocess_env()
     assert extra_env == {}
     assert tmp_files == []
@@ -461,22 +576,52 @@ def test_subprocess_env_write_failure(monkeypatch, caplog):
 
 # ── _extract_interrupt_response ───────────────────────────────────────────────
 
+
 def test_extract_interrupt_response_with_description():
-    events = [("updates", {
-        "__interrupt__": [{"value": {"action_requests": [
-            {"description": "Approve sending email?", "name": "send_email", "args": {}}
-        ]}}]
-    })]
+    events = [
+        (
+            "updates",
+            {
+                "__interrupt__": [
+                    {
+                        "value": {
+                            "action_requests": [
+                                {
+                                    "description": "Approve sending email?",
+                                    "name": "send_email",
+                                    "args": {},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+    ]
     response = run_eval._extract_interrupt_response(events)
     assert "Approve sending email?" in response
 
 
 def test_extract_interrupt_response_falls_back_to_name_args():
-    events = [("updates", {
-        "__interrupt__": [{"value": {"action_requests": [
-            {"name": "send_email", "args": {"to": "user@example.com"}}
-        ]}}]
-    })]
+    events = [
+        (
+            "updates",
+            {
+                "__interrupt__": [
+                    {
+                        "value": {
+                            "action_requests": [
+                                {
+                                    "name": "send_email",
+                                    "args": {"to": "user@example.com"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+    ]
     response = run_eval._extract_interrupt_response(events)
     assert "send_email" in response
 
@@ -495,25 +640,35 @@ def test_extract_interrupt_response_skips_non_updates():
 
 
 def test_extract_interrupt_response_empty_action_requests():
-    events = [("updates", {
-        "__interrupt__": [{"value": {"action_requests": []}}]
-    })]
+    events = [("updates", {"__interrupt__": [{"value": {"action_requests": []}}]})]
     assert run_eval._extract_interrupt_response(events) == ""
 
 
 def test_extract_interrupt_response_multiple_requests():
-    events = [("updates", {
-        "__interrupt__": [{"value": {"action_requests": [
-            {"description": "First approval"},
-            {"description": "Second approval"},
-        ]}}]
-    })]
+    events = [
+        (
+            "updates",
+            {
+                "__interrupt__": [
+                    {
+                        "value": {
+                            "action_requests": [
+                                {"description": "First approval"},
+                                {"description": "Second approval"},
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+    ]
     response = run_eval._extract_interrupt_response(events)
     assert "First approval" in response
     assert "Second approval" in response
 
 
 # ── _find_lightspeed_cmd ────────────────────────────────────────────────────────
+
 
 def test_find_lightspeed_cmd_from_venv_bin(tmp_path, monkeypatch):
     fake_bin = tmp_path / "bin"
@@ -527,7 +682,9 @@ def test_find_lightspeed_cmd_from_venv_bin(tmp_path, monkeypatch):
 def test_find_lightspeed_cmd_via_which(monkeypatch):
     monkeypatch.setattr(run_eval.sys, "executable", "/usr/bin/python3")
     with patch.object(Path, "exists", return_value=False):
-        which_result = MagicMock(returncode=0, stdout="/usr/local/bin/lightspeed-eval\n")
+        which_result = MagicMock(
+            returncode=0, stdout="/usr/local/bin/lightspeed-eval\n"
+        )
         with patch("run_eval.subprocess.run", return_value=which_result):
             result = run_eval._find_lightspeed_cmd()
     assert result == ["/usr/local/bin/lightspeed-eval"]
@@ -543,6 +700,7 @@ def test_find_lightspeed_cmd_not_found(monkeypatch):
 
 
 # ── _parse_args ─────────────────────────────────────────────────────────────────
+
 
 def test_parse_args_defaults(monkeypatch):
     monkeypatch.delenv("AGENT_HOST", raising=False)
@@ -568,6 +726,7 @@ def test_parse_args_from_env(monkeypatch):
 
 # ── _log_summary ──────────────────────────────────────────────────────────────
 
+
 def test_log_summary_no_summary_files(tmp_path, caplog):
     with caplog.at_level(logging.INFO, logger="run_eval"):
         run_eval._log_summary(tmp_path)
@@ -576,9 +735,9 @@ def test_log_summary_no_summary_files(tmp_path, caplog):
 
 def test_log_summary_invalid_json(tmp_path, caplog):
     (tmp_path / "bad_summary.json").write_text("not-json")
-    with caplog.at_level(logging.INFO, logger="run_eval"):
+    with caplog.at_level(logging.WARNING, logger="run_eval"):
         run_eval._log_summary(tmp_path)
-    assert "report written to" in caplog.text
+    assert "failed to parse summary" in caplog.text
 
 
 def test_log_summary_with_stats(tmp_path, caplog):
@@ -592,7 +751,7 @@ def test_log_summary_with_stats(tmp_path, caplog):
         "results": [{"metric_identifier": "intent_eval", "threshold": 0.7}],
     }
     (tmp_path / "run_summary.json").write_text(json.dumps(summary))
-    with caplog.at_level(logging.INFO, logger="run_eval"):
+    with caplog.at_level(logging.DEBUG, logger="run_eval"):
         run_eval._log_summary(tmp_path)
     assert "overall: 8/10 passed (80%)" in caplog.text
     assert "intent_eval" in caplog.text
@@ -616,6 +775,7 @@ def test_log_summary_below_threshold_warns(tmp_path, caplog):
 
 
 # ── _run_lightspeed ───────────────────────────────────────────────────────────
+
 
 def test_run_lightspeed_invokes_subprocess(tmp_path, monkeypatch):
     system = tmp_path / "system.yaml"
@@ -697,6 +857,7 @@ def test_run_lightspeed_cleans_up_temp_credential_files(tmp_path, monkeypatch):
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
+
 def _main_args(tmp_path: Path) -> MagicMock:
     eval_data = tmp_path / "eval_data.yaml"
     system = tmp_path / "system.yaml"
@@ -744,8 +905,12 @@ def test_main_success_flow(tmp_path, monkeypatch):
     args = _main_args(tmp_path)
     monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
     with patch.object(run_eval, "_parse_args", return_value=args):
-        with patch.object(run_eval, "_find_lightspeed_cmd", return_value=["/bin/lightspeed-eval"]):
-            with patch.object(run_eval, "_populate_dataset", return_value=[{"turns": []}]):
+        with patch.object(
+            run_eval, "_find_lightspeed_cmd", return_value=["/bin/lightspeed-eval"]
+        ):
+            with patch.object(
+                run_eval, "_populate_dataset", return_value=[{"turns": []}]
+            ):
                 with patch.object(run_eval, "_run_lightspeed", return_value=0):
                     with patch.object(run_eval, "_log_summary") as mock_summary:
                         with pytest.raises(SystemExit) as exc:
@@ -758,8 +923,12 @@ def test_main_exits_with_lightspeed_failure_code(tmp_path, monkeypatch):
     args = _main_args(tmp_path)
     monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
     with patch.object(run_eval, "_parse_args", return_value=args):
-        with patch.object(run_eval, "_find_lightspeed_cmd", return_value=["/bin/lightspeed-eval"]):
-            with patch.object(run_eval, "_populate_dataset", return_value=[{"turns": []}]):
+        with patch.object(
+            run_eval, "_find_lightspeed_cmd", return_value=["/bin/lightspeed-eval"]
+        ):
+            with patch.object(
+                run_eval, "_populate_dataset", return_value=[{"turns": []}]
+            ):
                 with patch.object(run_eval, "_run_lightspeed", return_value=3):
                     with patch.object(run_eval, "_log_summary"):
                         with pytest.raises(SystemExit) as exc:
@@ -774,8 +943,12 @@ def test_main_warns_without_google_credentials(tmp_path, monkeypatch, caplog):
     monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
     with caplog.at_level(logging.WARNING, logger="run_eval"):
         with patch.object(run_eval, "_parse_args", return_value=args):
-            with patch.object(run_eval, "_find_lightspeed_cmd", return_value=["/bin/lightspeed-eval"]):
-                with patch.object(run_eval, "_populate_dataset", return_value=[{"turns": []}]):
+            with patch.object(
+                run_eval, "_find_lightspeed_cmd", return_value=["/bin/lightspeed-eval"]
+            ):
+                with patch.object(
+                    run_eval, "_populate_dataset", return_value=[{"turns": []}]
+                ):
                     with patch.object(run_eval, "_run_lightspeed", return_value=0):
                         with patch.object(run_eval, "_log_summary"):
                             with pytest.raises(SystemExit):

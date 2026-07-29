@@ -1,4 +1,5 @@
 """Tests for eval_postgres.py — DB access layer."""
+
 from __future__ import annotations
 
 import json
@@ -12,6 +13,7 @@ import eval_postgres
 
 
 # ── _compute_config_hash ──────────────────────────────────────────────────────
+
 
 def test_compute_config_hash_returns_16_chars(tmp_path):
     h = eval_postgres._compute_config_hash(str(tmp_path))
@@ -77,6 +79,7 @@ def test_get_config_hash_prefers_env_var():
 
 # ── ensure_table ──────────────────────────────────────────────────────────────
 
+
 def test_ensure_table_executes_create(mock_psycopg2_conn):
     conn, cursor = mock_psycopg2_conn
     with patch("eval_postgres._get_conn", return_value=conn):
@@ -104,19 +107,25 @@ def test_ensure_table_handles_db_error(caplog):
 
 # ── write_eval_result ─────────────────────────────────────────────────────────
 
+
 def test_write_eval_result_success(mock_psycopg2_conn, caplog):
     conn, cursor = mock_psycopg2_conn
     cursor.fetchone.return_value = (42,)
     with caplog.at_level(logging.INFO):
         with patch("eval_postgres._get_conn", return_value=conn):
             eval_postgres.write_eval_result(
-                passed=8, failed=2, errors=0, eval_score=0.8,
-                ls_run_ids=["run1"], org="test", name="agent",
+                passed=8,
+                failed=2,
+                errors=0,
+                eval_score=0.8,
+                ls_run_ids=["run1"],
+                org="test",
+                name="agent",
             )
     cursor.execute.assert_called_once()
     args = cursor.execute.call_args[0][1]
     assert args[0] == ["run1"]  # ls_run_ids
-    assert args[1] == 0.8       # eval_score
+    assert args[1] == 0.8  # eval_score
     assert "eval_result_written_to_postgres" in caplog.text
     conn.close.assert_called_once()
 
@@ -126,7 +135,10 @@ def test_write_eval_result_logs_warning_when_no_match(mock_psycopg2_conn, caplog
     cursor.fetchone.return_value = None
     with patch("eval_postgres._get_conn", return_value=conn):
         eval_postgres.write_eval_result(
-            passed=0, failed=1, errors=0, eval_score=0.0,
+            passed=0,
+            failed=1,
+            errors=0,
+            eval_score=0.0,
         )
     assert "eval_postgres_no_matching_record" in caplog.text
 
@@ -134,7 +146,10 @@ def test_write_eval_result_logs_warning_when_no_match(mock_psycopg2_conn, caplog
 def test_write_eval_result_handles_db_error(caplog):
     with patch("eval_postgres._get_conn", side_effect=Exception("timeout")):
         eval_postgres.write_eval_result(
-            passed=0, failed=0, errors=1, eval_score=0.0,
+            passed=0,
+            failed=0,
+            errors=1,
+            eval_score=0.0,
         )
     assert "eval_postgres_write_failed" in caplog.text
 
@@ -158,7 +173,10 @@ def test_write_eval_result_serialises_results_detail(mock_psycopg2_conn):
     detail = {"turns": [], "summary": {}}
     with patch("eval_postgres._get_conn", return_value=conn):
         eval_postgres.write_eval_result(
-            passed=1, failed=0, errors=0, eval_score=1.0,
+            passed=1,
+            failed=0,
+            errors=0,
+            eval_score=1.0,
             results_detail=detail,
         )
     args = cursor.execute.call_args[0][1]
@@ -170,8 +188,13 @@ def test_write_eval_result_passes_explicit_config_hash(mock_psycopg2_conn):
     cursor.fetchone.return_value = (1,)
     with patch("eval_postgres._get_conn", return_value=conn):
         eval_postgres.write_eval_result(
-            passed=1, failed=0, errors=0, eval_score=1.0,
-            config_hash="abc123", org="myorg", name="myagent",
+            passed=1,
+            failed=0,
+            errors=0,
+            eval_score=1.0,
+            config_hash="abc123",
+            org="myorg",
+            name="myagent",
         )
     args = cursor.execute.call_args[0][1]
     assert args[9] == "myorg"
@@ -180,6 +203,7 @@ def test_write_eval_result_passes_explicit_config_hash(mock_psycopg2_conn):
 
 
 # ── load_results_since ────────────────────────────────────────────────────────
+
 
 def test_load_results_since_empty_returns_empty(mock_psycopg2_conn, caplog):
     conn, cursor = mock_psycopg2_conn
@@ -194,26 +218,23 @@ def test_load_results_since_empty_returns_empty(mock_psycopg2_conn, caplog):
 def test_load_results_since_aggregates_correctly(mock_psycopg2_conn):
     conn, cursor = mock_psycopg2_conn
     now = datetime.now(UTC)
-    cursor.fetchall.side_effect = [
-        [{"run_id": "run1"}],                        # DISTINCT run_ids
-        [                                             # all rows
-            {
-                "run_id": "run1",
-                "result": "PASS",
-                "metric_identifier": "custom:tool_eval",
-                "conversation_group_id": "conv1",
-                "score": 1.0,
-                "timestamp": now,
-            },
-            {
-                "run_id": "run1",
-                "result": "FAIL",
-                "metric_identifier": "custom:tool_eval",
-                "conversation_group_id": "conv1",
-                "score": 0.0,
-                "timestamp": now,
-            },
-        ],
+    cursor.fetchall.return_value = [
+        {
+            "run_id": "run1",
+            "result": "PASS",
+            "metric_identifier": "custom:tool_eval",
+            "conversation_group_id": "conv1",
+            "score": 1.0,
+            "timestamp": now,
+        },
+        {
+            "run_id": "run1",
+            "result": "FAIL",
+            "metric_identifier": "custom:tool_eval",
+            "conversation_group_id": "conv1",
+            "score": 0.0,
+            "timestamp": now,
+        },
     ]
     with patch("eval_postgres._get_conn", return_value=conn):
         result = eval_postgres.load_results_since(now)
@@ -229,10 +250,15 @@ def test_load_results_since_aggregates_correctly(mock_psycopg2_conn):
 def test_load_results_since_serialises_datetime_in_turns(mock_psycopg2_conn):
     conn, cursor = mock_psycopg2_conn
     now = datetime.now(UTC)
-    cursor.fetchall.side_effect = [
-        [{"run_id": "r1"}],
-        [{"run_id": "r1", "result": "PASS", "metric_identifier": "m",
-          "conversation_group_id": "c", "score": 1.0, "timestamp": now}],
+    cursor.fetchall.return_value = [
+        {
+            "run_id": "r1",
+            "result": "PASS",
+            "metric_identifier": "m",
+            "conversation_group_id": "c",
+            "score": 1.0,
+            "timestamp": now,
+        },
     ]
     with patch("eval_postgres._get_conn", return_value=conn):
         result = eval_postgres.load_results_since(now)
@@ -242,10 +268,15 @@ def test_load_results_since_serialises_datetime_in_turns(mock_psycopg2_conn):
 def test_load_results_since_serialises_float_scores(mock_psycopg2_conn):
     conn, cursor = mock_psycopg2_conn
     now = datetime.now(UTC)
-    cursor.fetchall.side_effect = [
-        [{"run_id": "r1"}],
-        [{"run_id": "r1", "result": "PASS", "metric_identifier": "m",
-          "conversation_group_id": "c", "score": 0.95, "timestamp": now}],
+    cursor.fetchall.return_value = [
+        {
+            "run_id": "r1",
+            "result": "PASS",
+            "metric_identifier": "m",
+            "conversation_group_id": "c",
+            "score": 0.95,
+            "timestamp": now,
+        },
     ]
     with patch("eval_postgres._get_conn", return_value=conn):
         result = eval_postgres.load_results_since(now)
@@ -262,10 +293,15 @@ def test_load_results_since_handles_db_error(caplog):
 def test_load_results_since_error_result_counted_as_error(mock_psycopg2_conn):
     conn, cursor = mock_psycopg2_conn
     now = datetime.now(UTC)
-    cursor.fetchall.side_effect = [
-        [{"run_id": "r1"}],
-        [{"run_id": "r1", "result": "UNKNOWN", "metric_identifier": "m",
-          "conversation_group_id": "c", "score": 0.0, "timestamp": now}],
+    cursor.fetchall.return_value = [
+        {
+            "run_id": "r1",
+            "result": "UNKNOWN",
+            "metric_identifier": "m",
+            "conversation_group_id": "c",
+            "score": 0.0,
+            "timestamp": now,
+        },
     ]
     with patch("eval_postgres._get_conn", return_value=conn):
         result = eval_postgres.load_results_since(now)
@@ -275,26 +311,23 @@ def test_load_results_since_error_result_counted_as_error(mock_psycopg2_conn):
 def test_load_results_since_by_metric_and_conversation(mock_psycopg2_conn):
     conn, cursor = mock_psycopg2_conn
     now = datetime.now(UTC)
-    cursor.fetchall.side_effect = [
-        [{"run_id": "r1"}],
-        [
-            {
-                "run_id": "r1",
-                "result": "PASS",
-                "metric_identifier": "custom:tool_eval",
-                "conversation_group_id": "conv1",
-                "score": 1.0,
-                "timestamp": now,
-            },
-            {
-                "run_id": "r1",
-                "result": "FAIL",
-                "metric_identifier": "custom:intent_eval",
-                "conversation_group_id": "conv2",
-                "score": 0.0,
-                "timestamp": now,
-            },
-        ],
+    cursor.fetchall.return_value = [
+        {
+            "run_id": "r1",
+            "result": "PASS",
+            "metric_identifier": "custom:tool_eval",
+            "conversation_group_id": "conv1",
+            "score": 1.0,
+            "timestamp": now,
+        },
+        {
+            "run_id": "r1",
+            "result": "FAIL",
+            "metric_identifier": "custom:intent_eval",
+            "conversation_group_id": "conv2",
+            "score": 0.0,
+            "timestamp": now,
+        },
     ]
     with patch("eval_postgres._get_conn", return_value=conn):
         result = eval_postgres.load_results_since(now)
@@ -310,13 +343,20 @@ def test_load_results_since_by_metric_and_conversation(mock_psycopg2_conn):
 
 # ── get_results_by_run_id ─────────────────────────────────────────────────────
 
+
 def test_get_results_by_run_id_returns_rows(mock_psycopg2_conn):
     conn, cursor = mock_psycopg2_conn
     cursor.description = [
-        ("conversation_group_id",), ("turn_id",), ("metric_identifier",),
-        ("result",), ("score",), ("reason",),
+        ("conversation_group_id",),
+        ("turn_id",),
+        ("metric_identifier",),
+        ("result",),
+        ("score",),
+        ("reason",),
     ]
-    cursor.fetchall.return_value = [("conv1", "turn_1", "custom:tool_eval", "PASS", 1.0, "ok")]
+    cursor.fetchall.return_value = [
+        ("conv1", "turn_1", "custom:tool_eval", "PASS", 1.0, "ok")
+    ]
     with patch("eval_postgres._get_conn", return_value=conn):
         rows = eval_postgres.get_results_by_run_id("run1")
     assert len(rows) == 1

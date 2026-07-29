@@ -13,10 +13,12 @@ and checkpointer all work correctly without side effects on other requests.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -34,9 +36,6 @@ _HASH_EXCLUDE_DIRS = {"evals", "deployment"}
 
 def _compute_config_hash() -> str:
     """SHA256 of behavior-relevant config files (prompts, skills, runtime, tools)."""
-    import hashlib
-    from pathlib import Path
-
     config_dir = Path(os.environ.get("AGENT_CONFIG_DIR", "config/agent"))
     h = hashlib.sha256()
     if config_dir.exists():
@@ -156,13 +155,6 @@ async def _run_and_get_state(
     return resp.json()  # type: ignore[no-any-return]
 
 
-async def _get_thread_state(client: httpx.AsyncClient, thread_id: str) -> dict:
-    """/threads/{id}/state — returns {"values": {"messages": [...]}, "next": [...]}."""
-    resp = await client.get(f"{AGENT_BASE_URL}/threads/{thread_id}/state")
-    resp.raise_for_status()
-    return resp.json()  # type: ignore[no-any-return]
-
-
 def _extract_tool_calls_from_messages(messages: list[Any]) -> list[dict[str, Any]]:
     """Extract non-internal tool calls from a list of LangChain messages."""
     import json as _json
@@ -249,14 +241,27 @@ async def _collect_subagent_tool_calls_via_remote_graph(
 async def _collect_subagent_tool_calls_from_postgres(
     thread_id: str,
 ) -> list[dict[str, Any]]:
-    """Fallback: read subagent tool calls directly from Postgres checkpoint store."""
+    """Fallback: read subagent tool calls directly from Postgres checkpoint store.
+
+    Blob format (LangGraph checkpoint serde):
+        list of [module_path, class_name, message_dict] per message.
+
+    The Gemini thought-signature fields use msgpack ext types — the ext_hook
+    returns raw bytes for unknown types instead of raising, so those fields are
+    ignored without aborting the entire blob parse.
+    """
     import msgpack
     import psycopg
 
     from deep_agent.src.settings import settings
 
     def _ext_hook(code: int, data: bytes) -> Any:
-        return msgpack.unpackb(data, raw=False, ext_hook=_ext_hook)
+        # Return raw bytes for unknown ext types instead of raising —
+        # prevents Gemini thought-signature binary payloads from aborting parse.
+        try:
+            return msgpack.unpackb(data, raw=False, ext_hook=_ext_hook)
+        except Exception:
+            return data
 
     tool_calls: list[dict[str, Any]] = []
 
@@ -278,14 +283,18 @@ async def _collect_subagent_tool_calls_from_postgres(
                     continue
                 try:
                     items = msgpack.unpackb(bytes(blob), raw=False, ext_hook=_ext_hook)
+                    if not isinstance(items, (list, tuple)):
+                        continue
                     for item in items:
+                        # Each item: [module_path, class_name, message_dict]
                         if not isinstance(item, (list, tuple)) or len(item) < 3:
                             continue
                         msg = item[2]
                         if not isinstance(msg, dict) or msg.get("type") != "ai":
                             continue
                         tool_calls.extend(_extract_tool_calls_from_messages([msg]))
-                except Exception:
+                except Exception as exc:
+                    log.debug("Skipping blob for %s: %s", thread_id, exc)
                     continue
     except Exception as exc:
         log.warning("Postgres subagent tool call extraction failed: %s", exc)
@@ -302,13 +311,13 @@ def _messages_from_run(run_state: dict) -> list[dict]:
 
 def _detect_interrupt(run_state: dict) -> bool:
     """Return True if the run state has a pending HITL interrupt."""
-    # /runs/wait: __interrupt__ at top level
     if run_state.get("__interrupt__"):
         return True
-    # /threads/{id}/state: check next nodes or values
     next_nodes = run_state.get("next", [])
     values = run_state.get("values", {})
-    return bool(values.get("__interrupt__")) or "__interrupt__" in str(next_nodes)
+    return bool(values.get("__interrupt__")) or any(
+        "__interrupt__" in str(n) for n in next_nodes
+    )
 
 
 @router.get("/thread-tool-calls/{thread_id}")
@@ -410,30 +419,34 @@ async def eval_run(body: EvalRunRequest) -> EvalRunResponse:
 
 eval_mgmt_router = APIRouter(prefix="/evals", tags=["eval-management"])
 
-_ENSURE_EVALS_TABLE = """
-CREATE TABLE IF NOT EXISTS evals (
-    id              SERIAL PRIMARY KEY,
-    org             TEXT NOT NULL,
-    name            TEXT NOT NULL,
-    config_hash     TEXT NOT NULL,
-    eval_status     TEXT NOT NULL DEFAULT 'in_progress',
-    ls_run_id       VARCHAR(36),
-    eval_score      FLOAT,
-    pass            INTEGER DEFAULT 0,
-    fail            INTEGER DEFAULT 0,
-    error           INTEGER DEFAULT 0,
-    judge_model     TEXT,
-    results_detail  JSONB,
-    force_reeval    BOOLEAN DEFAULT FALSE,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    completed_at    TIMESTAMPTZ
-);
-CREATE INDEX IF NOT EXISTS evals_org_name_hash ON evals (org, name, config_hash);
-CREATE INDEX IF NOT EXISTS evals_status ON evals (eval_status);
-CREATE INDEX IF NOT EXISTS evals_ls_run_id ON evals (ls_run_id);
-CREATE INDEX IF NOT EXISTS evals_history ON evals (org, name, eval_status, completed_at DESC);
-"""
+_EVALS_DDL_STATEMENTS = [
+    """
+    CREATE TABLE IF NOT EXISTS evals (
+        id              SERIAL PRIMARY KEY,
+        org             TEXT NOT NULL,
+        name            TEXT NOT NULL,
+        config_hash     TEXT NOT NULL,
+        eval_status     TEXT NOT NULL DEFAULT 'in_progress',
+        eval_score      FLOAT,
+        ls_run_ids      TEXT[],
+        pass            INTEGER DEFAULT 0,
+        fail            INTEGER DEFAULT 0,
+        error           INTEGER DEFAULT 0,
+        judge_model     TEXT,
+        results_detail  JSONB,
+        force_reeval    BOOLEAN DEFAULT FALSE,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at    TIMESTAMPTZ
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS evals_org_name_hash ON evals (org, name, config_hash)",
+    "CREATE INDEX IF NOT EXISTS evals_status ON evals (eval_status)",
+    "CREATE INDEX IF NOT EXISTS evals_history ON evals (org, name, eval_status, completed_at DESC)",
+    "ALTER TABLE evals ADD COLUMN IF NOT EXISTS ls_run_ids TEXT[]",
+    "ALTER TABLE evals DROP COLUMN IF EXISTS ls_run_id",
+    "DROP INDEX IF EXISTS evals_ls_run_id",
+]
 
 
 async def _pg_conn() -> Any:
@@ -445,11 +458,19 @@ async def _pg_conn() -> Any:
 
 
 async def _ensure_evals_table() -> None:
+    conn = await _pg_conn()
+    await conn.set_autocommit(True)
     try:
-        async with await _pg_conn() as conn:
-            await conn.execute(_ENSURE_EVALS_TABLE)
-    except Exception as exc:
-        log.warning("evals table ensure failed: %s", exc)
+        for stmt in _EVALS_DDL_STATEMENTS:
+            try:
+                await conn.execute(stmt)
+            except Exception as exc:
+                log.warning(
+                    "evals DDL statement failed: %s | stmt: %.120s", exc, stmt.strip()
+                )
+                raise
+    finally:
+        await conn.close()
 
 
 _table_ensured = False
@@ -463,9 +484,8 @@ async def _ensure_evals_table_once() -> None:
     _table_ensured = True
 
 
-async def _pg_row_to_dict(row: Any, cursor: Any) -> dict[str, Any]:
-    cols = [d.name for d in cursor.description]
-    return dict(zip(cols, row))
+def _pg_row_to_dict(row: Any, cursor: Any) -> dict[str, Any]:
+    return dict(zip([d.name for d in cursor.description], row))
 
 
 async def _atomic_set_in_progress(
@@ -491,7 +511,7 @@ async def _atomic_set_in_progress(
         if existing is not None:
             if force:
                 return None, False
-            return dict(zip([d.name for d in row.description], existing)), False
+            return _pg_row_to_dict(existing, row), False
 
         cur = await conn.execute(
             """INSERT INTO evals
@@ -502,7 +522,7 @@ async def _atomic_set_in_progress(
             (_AGENT_ORG, _AGENT_NAME, config_hash, force, now, now),
         )
         new_row = await cur.fetchone()
-        doc = dict(zip([d.name for d in cur.description], new_row))
+        doc = _pg_row_to_dict(new_row, cur)
         doc.pop("id", None)
         return doc, True
 
@@ -517,8 +537,7 @@ def _get_config_hash() -> str:
 
 async def _fire_eval_run(config_hash: str, auth_token: str = "") -> None:
     """Fire-and-forget call to eval runner. Errors are logged, never raised."""
-    eval_runner_url = os.environ.get("EVAL_RUNNER_URL", _EVAL_RUNNER_URL)
-    if not eval_runner_url:
+    if not _EVAL_RUNNER_URL:
         log.warning("EVAL_RUNNER_URL not set — eval pod not started")
         return
     try:
@@ -531,7 +550,7 @@ async def _fire_eval_run(config_hash: str, auth_token: str = "") -> None:
             )
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
-                f"{eval_runner_url}/evals/run",
+                f"{_EVAL_RUNNER_URL}/evals/run",
                 json={
                     "config_hash": config_hash,
                     "org": _AGENT_ORG,
@@ -544,22 +563,23 @@ async def _fire_eval_run(config_hash: str, auth_token: str = "") -> None:
         log.warning("eval_runner_call_failed: %s", exc)
 
 
-@eval_mgmt_router.post("/trigger")
-async def trigger_eval(request: Request) -> dict[str, Any]:
-    """Cache-first eval trigger. Returns cached result or sets in_progress."""
-    from pathlib import Path as _Path
-
+def _require_eval_cases() -> None:
+    """Raise HTTPException(400) if eval_cases.yaml is missing."""
     from fastapi import HTTPException
 
-    # Verify eval dataset exists before creating an in_progress entry —
-    # avoids a stuck row when the eval runner would reject with 400.
-    _agent_config_dir = os.environ.get("CONFIG_PATH", "config/agent")
-    _eval_cases = _Path(f"{_agent_config_dir}/evals/lightspeed-agent/eval_cases.yaml")
-    if not _eval_cases.exists():
+    config_dir = os.environ.get("CONFIG_PATH", "config/agent")
+    eval_cases = Path(f"{config_dir}/evals/lightspeed-agent/eval_cases.yaml")
+    if not eval_cases.exists():
         raise HTTPException(
             status_code=400,
             detail="No eval dataset found. Add eval cases before running evaluation.",
         )
+
+
+@eval_mgmt_router.post("/trigger")
+async def trigger_eval(request: Request) -> dict[str, Any]:
+    """Cache-first eval trigger. Returns cached result or sets in_progress."""
+    _require_eval_cases()
 
     config_hash = _get_config_hash()
 
@@ -573,7 +593,7 @@ async def trigger_eval(request: Request) -> dict[str, Any]:
         )
         existing = await row.fetchone()
         if existing:
-            doc = dict(zip([d.name for d in row.description], existing))
+            doc = _pg_row_to_dict(existing, row)
             doc.pop("id", None)
             return {"cached": True, **doc}
 
@@ -581,9 +601,8 @@ async def trigger_eval(request: Request) -> dict[str, Any]:
     if not is_new:
         return {"eval_status": "in_progress", "message": "evaluation already running"}
 
-    if is_new:
-        auth_token = request.headers.get("authorization", "")
-        asyncio.create_task(_fire_eval_run(config_hash, auth_token))
+    auth_token = request.headers.get("authorization", "")
+    asyncio.create_task(_fire_eval_run(config_hash, auth_token))
 
     return {
         "eval_status": "in_progress",
@@ -597,17 +616,7 @@ async def trigger_eval(request: Request) -> dict[str, Any]:
 @eval_mgmt_router.post("/force-trigger")
 async def force_trigger_eval(request: Request) -> dict[str, Any]:
     """Force a fresh eval run, bypassing cache."""
-    from pathlib import Path as _Path
-
-    from fastapi import HTTPException
-
-    _agent_config_dir = os.environ.get("CONFIG_PATH", "config/agent")
-    _eval_cases = _Path(f"{_agent_config_dir}/evals/lightspeed-agent/eval_cases.yaml")
-    if not _eval_cases.exists():
-        raise HTTPException(
-            status_code=400,
-            detail="No eval dataset found. Add eval cases before running evaluation.",
-        )
+    _require_eval_cases()
 
     config_hash = _get_config_hash()
 
@@ -615,9 +624,8 @@ async def force_trigger_eval(request: Request) -> dict[str, Any]:
     if not is_new:
         return {"eval_status": "in_progress", "message": "evaluation already running"}
 
-    if is_new:
-        auth_token = request.headers.get("authorization", "")
-        asyncio.create_task(_fire_eval_run(config_hash, auth_token))
+    auth_token = request.headers.get("authorization", "")
+    asyncio.create_task(_fire_eval_run(config_hash, auth_token))
 
     return {
         "eval_status": "in_progress",
@@ -629,11 +637,24 @@ async def force_trigger_eval(request: Request) -> dict[str, Any]:
     }
 
 
+_EVAL_STALE_TIMEOUT_MINUTES = int(os.environ.get("EVAL_STALE_TIMEOUT_MINUTES", "300"))
+
+
 @eval_mgmt_router.get("/status")
 async def eval_status() -> dict[str, Any]:
-    """Return the latest eval record for this agent."""
+    """Return the latest eval record for this agent.
+
+    Auto-expires in_progress rows older than EVAL_STALE_TIMEOUT_MINUTES (default 30)
+    so a crashed eval run does not leave the UI stuck in Evaluating forever.
+    """
     await _ensure_evals_table_once()
     async with await _pg_conn() as conn:
+        await conn.execute(
+            "UPDATE evals SET eval_status='error', completed_at=NOW(), updated_at=NOW() "
+            "WHERE org=%s AND name=%s AND eval_status='in_progress' "
+            "AND created_at < NOW() - INTERVAL '%s minutes'",
+            (_AGENT_ORG, _AGENT_NAME, _EVAL_STALE_TIMEOUT_MINUTES),
+        )
         row = await conn.execute(
             "SELECT * FROM evals WHERE org=%s AND name=%s "
             "ORDER BY created_at DESC LIMIT 1",
@@ -642,7 +663,7 @@ async def eval_status() -> dict[str, Any]:
         result = await row.fetchone()
         if not result:
             return {"eval_status": "not_started", "message": "no eval runs yet"}
-        doc = dict(zip([d.name for d in row.description], result))
+        doc = _pg_row_to_dict(result, row)
         doc.pop("id", None)
         return doc
 
@@ -676,7 +697,7 @@ async def eval_results(request: Request) -> dict[str, Any]:
         result = await row.fetchone()
         if not result:
             raise HTTPException(status_code=404, detail="no completed eval results")
-        doc = dict(zip([d.name for d in row.description], result))
+        doc = _pg_row_to_dict(result, row)
         doc.pop("id", None)
         return doc
 
@@ -688,16 +709,10 @@ async def eval_history(request: Request) -> dict[str, Any]:
     await _ensure_evals_table_once()
 
     async with await _pg_conn() as conn:
-        count_cur = await conn.execute(
-            "SELECT COUNT(*) FROM evals "
-            "WHERE org=%s AND name=%s AND eval_status='completed'",
-            (_AGENT_ORG, _AGENT_NAME),
-        )
-        total = (await count_cur.fetchone())[0]
-
         cur = await conn.execute(
             "SELECT eval_score, pass, fail, error, config_hash, "
-            "       created_at, completed_at "
+            "       created_at, completed_at, "
+            "       COUNT(*) OVER() AS total_count "
             "FROM evals "
             "WHERE org=%s AND name=%s AND eval_status='completed' "
             "ORDER BY completed_at DESC LIMIT %s",
@@ -705,8 +720,10 @@ async def eval_history(request: Request) -> dict[str, Any]:
         )
         cols = [d.name for d in cur.description]
         runs = []
+        total = 0
         async for row in cur:
             d = dict(zip(cols, row))
+            total = d.pop("total_count", 0)
             for k in ("created_at", "completed_at"):
                 if d.get(k) is not None:
                     d[k] = d[k].isoformat() if hasattr(d[k], "isoformat") else str(d[k])
@@ -754,11 +771,6 @@ async def eval_trends(request: Request) -> dict[str, Any]:
                         "pass_rate": stats.get("pass_rate")
                         if isinstance(stats, dict)
                         else None,
-                        "score_mean": (
-                            stats.get("score_statistics", {}).get("mean")
-                            if isinstance(stats, dict)
-                            else None
-                        ),
                     }
                 )
 

@@ -19,10 +19,6 @@
 ##   redis                 - Aegra broker (SSE streaming, job queue)
 ##   template-agent        - Agent (port 5002)
 ##
-## Eval profile:  Standalone eval runner
-##   docker compose --profile eval up
-##   eval-runner           - Eval API (port 8099)
-##
 ## Services (demo profile):
 ##   template-mcp-server   - MCP server with SSO auth (port 5001)
 ##   template-ui           - React/Fastify frontend with SSO auth (port 8080)
@@ -69,43 +65,8 @@ services:
     networks:
       - agent-network
 
-  eval-runner:
-    profiles: [eval]
-    build:
-      context: ./eval-runner
-      dockerfile: Containerfile
-    container_name: template-agent-eval-runner
-    ports:
-      - "8099:8099"
-    environment:
-      - AGENT_HOST=http://template-agent:5002
-      - AGENT_CONFIG_DIR=/agent-config
-      - AI_PLATFORM_AGENT_ORG=demo
-      - AI_PLATFORM_AGENT_NAME=template-agent
-      - POSTGRES_HOST=pgvector
-      - POSTGRES_PORT=5432
-      - POSTGRES_DB=template_agent
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-    env_file:
-      - .env
-    volumes:
-      - ./config/agent:/agent-config:ro
-    depends_on:
-      template-agent:
-        condition: service_healthy
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://0.0.0.0:8099/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
-    networks:
-      - agent-network
-
   template-agent:
-    profiles: [container]
+    profiles: [container, observability]
     build:
       context: .
       dockerfile: Containerfile
@@ -118,8 +79,6 @@ services:
       - .env
     environment:
       - ENABLE_AUTH=true
-      - MONGODB_URI=
-      - EVAL_RUNNER_URL=http://template-agent-eval-runner:8099
       - POSTGRES_HOST=pgvector
       - POSTGRES_PORT=5432
       - POSTGRES_DB=template_agent
@@ -135,6 +94,7 @@ services:
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://jaeger:4317}
       - ENABLE_OTEL_TRACES=${ENABLE_OTEL_TRACES:-false}
       - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://jaeger:4317}
+      - EVAL_RUNNER_URL=http://template-agent-eval-runner:8099
     depends_on:
       pgvector:
         condition: service_healthy
