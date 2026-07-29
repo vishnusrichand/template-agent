@@ -643,7 +643,7 @@ def _subprocess_env() -> tuple[dict[str, str], list[Path]]:
     return extra_env, tmp_files
 
 
-def _run_lightspeed(  # pragma: no cover
+def _run_lightspeed(
     system_path: Path,
     populated_yaml: Path,
     output_dir: Path,
@@ -672,7 +672,7 @@ def _run_lightspeed(  # pragma: no cover
 # ── Summary ──────────────────────────────────────────────────────────────────
 
 
-def _log_summary(output_dir: Path) -> None:  # pragma: no cover
+def _log_summary(output_dir: Path) -> None:
     candidates = list(output_dir.glob("*_summary.json"))
     if not candidates:
         log.info("report written to %s", output_dir.resolve())
@@ -764,7 +764,7 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def main() -> None:  # pragma: no cover
+def main() -> None:
     """Entry point for the standalone eval runner."""
     args = _parse_args()
 

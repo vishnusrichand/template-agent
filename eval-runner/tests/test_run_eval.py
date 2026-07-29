@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -563,3 +564,220 @@ def test_parse_args_from_env(monkeypatch):
         args = run_eval._parse_args()
     assert args.agent_url == "http://agent.test"
     assert args.auth_token == "secret"
+
+
+# ── _log_summary ──────────────────────────────────────────────────────────────
+
+def test_log_summary_no_summary_files(tmp_path, caplog):
+    with caplog.at_level(logging.INFO, logger="run_eval"):
+        run_eval._log_summary(tmp_path)
+    assert "report written to" in caplog.text
+
+
+def test_log_summary_invalid_json(tmp_path, caplog):
+    (tmp_path / "bad_summary.json").write_text("not-json")
+    with caplog.at_level(logging.INFO, logger="run_eval"):
+        run_eval._log_summary(tmp_path)
+    assert "report written to" in caplog.text
+
+
+def test_log_summary_with_stats(tmp_path, caplog):
+    summary = {
+        "summary_stats": {
+            "overall": {"TOTAL": 10, "PASS": 8, "pass_rate": 80},
+            "by_metric": {
+                "intent_eval": {"pass": 8, "fail": 2, "pass_rate": 80},
+            },
+        },
+        "results": [{"metric_identifier": "intent_eval", "threshold": 0.7}],
+    }
+    (tmp_path / "run_summary.json").write_text(json.dumps(summary))
+    with caplog.at_level(logging.INFO, logger="run_eval"):
+        run_eval._log_summary(tmp_path)
+    assert "overall: 8/10 passed (80%)" in caplog.text
+    assert "intent_eval" in caplog.text
+    assert "full report:" in caplog.text
+
+
+def test_log_summary_below_threshold_warns(tmp_path, caplog):
+    summary = {
+        "summary_stats": {
+            "overall": {"total": 5, "passed": 2, "pass_rate": 40},
+            "by_metric": {
+                "tool_eval": {"pass": 2, "fail": 3, "pass_rate": 40},
+            },
+        },
+        "results": [{"metric_identifier": "tool_eval", "threshold": 0.8}],
+    }
+    (tmp_path / "run_summary.json").write_text(json.dumps(summary))
+    with caplog.at_level(logging.WARNING, logger="run_eval"):
+        run_eval._log_summary(tmp_path)
+    assert "BELOW threshold=0.8" in caplog.text
+
+
+# ── _run_lightspeed ───────────────────────────────────────────────────────────
+
+def test_run_lightspeed_invokes_subprocess(tmp_path, monkeypatch):
+    system = tmp_path / "system.yaml"
+    populated = tmp_path / "populated.yaml"
+    output_dir = tmp_path / "output"
+    system.write_text("system: true")
+    populated.write_text("data: true")
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS_CONTENT", raising=False)
+
+    mock_run = MagicMock(return_value=MagicMock(returncode=0))
+    with patch("run_eval.subprocess.run", mock_run):
+        code = run_eval._run_lightspeed(
+            system, populated, output_dir, ["/usr/bin/lightspeed-eval"]
+        )
+
+    assert code == 0
+    assert output_dir.exists()
+    mock_run.assert_called_once()
+    cmd = mock_run.call_args[0][0]
+    assert cmd == [
+        "/usr/bin/lightspeed-eval",
+        "--system-config",
+        str(system),
+        "--eval-data",
+        str(populated),
+        "--output-dir",
+        str(output_dir),
+    ]
+
+
+def test_run_lightspeed_returns_nonzero_exit_code(tmp_path, monkeypatch):
+    system = tmp_path / "system.yaml"
+    populated = tmp_path / "populated.yaml"
+    output_dir = tmp_path / "output"
+    system.write_text("system: true")
+    populated.write_text("data: true")
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS_CONTENT", raising=False)
+
+    mock_run = MagicMock(return_value=MagicMock(returncode=2))
+    with patch("run_eval.subprocess.run", mock_run):
+        code = run_eval._run_lightspeed(
+            system, populated, output_dir, ["/usr/bin/lightspeed-eval"]
+        )
+
+    assert code == 2
+
+
+def test_run_lightspeed_cleans_up_temp_credential_files(tmp_path, monkeypatch):
+    system = tmp_path / "system.yaml"
+    populated = tmp_path / "populated.yaml"
+    output_dir = tmp_path / "output"
+    system.write_text("system: true")
+    populated.write_text("data: true")
+    monkeypatch.setenv(
+        "GOOGLE_APPLICATION_CREDENTIALS_CONTENT",
+        json.dumps({"project_id": "test-proj", "type": "service_account"}),
+    )
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+
+    created_paths: list[Path] = []
+    original_subprocess_env = run_eval._subprocess_env
+
+    def capture_subprocess_env():
+        env, files = original_subprocess_env()
+        created_paths.extend(files)
+        return env, files
+
+    mock_run = MagicMock(return_value=MagicMock(returncode=0))
+    with patch("run_eval._subprocess_env", side_effect=capture_subprocess_env):
+        with patch("run_eval.subprocess.run", mock_run):
+            run_eval._run_lightspeed(
+                system, populated, output_dir, ["/usr/bin/lightspeed-eval"]
+            )
+
+    assert created_paths
+    for path in created_paths:
+        assert not path.exists()
+
+
+# ── main ──────────────────────────────────────────────────────────────────────
+
+def _main_args(tmp_path: Path) -> MagicMock:
+    eval_data = tmp_path / "eval_data.yaml"
+    system = tmp_path / "system.yaml"
+    eval_data.write_text("- conversation_group_id: g1\n  turns: []\n")
+    system.write_text("metrics: []\n")
+    return MagicMock(
+        agent_url="http://localhost:5002",
+        eval_data=[eval_data],
+        system=system,
+        output_dir=tmp_path / "output",
+        auth_token=None,
+        timeout=300,
+    )
+
+
+def test_main_exits_when_eval_data_missing(tmp_path):
+    missing = tmp_path / "missing.yaml"
+    args = _main_args(tmp_path)
+    args.eval_data = [missing]
+    with patch.object(run_eval, "_parse_args", return_value=args):
+        with pytest.raises(SystemExit) as exc:
+            run_eval.main()
+    assert exc.value.code == 1
+
+
+def test_main_exits_when_system_missing(tmp_path):
+    args = _main_args(tmp_path)
+    args.system = tmp_path / "missing_system.yaml"
+    with patch.object(run_eval, "_parse_args", return_value=args):
+        with pytest.raises(SystemExit) as exc:
+            run_eval.main()
+    assert exc.value.code == 1
+
+
+def test_main_exits_when_lightspeed_not_found(tmp_path):
+    args = _main_args(tmp_path)
+    with patch.object(run_eval, "_parse_args", return_value=args):
+        with patch.object(run_eval, "_find_lightspeed_cmd", return_value=None):
+            with pytest.raises(SystemExit) as exc:
+                run_eval.main()
+    assert exc.value.code == 1
+
+
+def test_main_success_flow(tmp_path, monkeypatch):
+    args = _main_args(tmp_path)
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    with patch.object(run_eval, "_parse_args", return_value=args):
+        with patch.object(run_eval, "_find_lightspeed_cmd", return_value=["/bin/lightspeed-eval"]):
+            with patch.object(run_eval, "_populate_dataset", return_value=[{"turns": []}]):
+                with patch.object(run_eval, "_run_lightspeed", return_value=0):
+                    with patch.object(run_eval, "_log_summary") as mock_summary:
+                        with pytest.raises(SystemExit) as exc:
+                            run_eval.main()
+    assert exc.value.code == 0
+    mock_summary.assert_called_once_with(args.output_dir)
+
+
+def test_main_exits_with_lightspeed_failure_code(tmp_path, monkeypatch):
+    args = _main_args(tmp_path)
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    with patch.object(run_eval, "_parse_args", return_value=args):
+        with patch.object(run_eval, "_find_lightspeed_cmd", return_value=["/bin/lightspeed-eval"]):
+            with patch.object(run_eval, "_populate_dataset", return_value=[{"turns": []}]):
+                with patch.object(run_eval, "_run_lightspeed", return_value=3):
+                    with patch.object(run_eval, "_log_summary"):
+                        with pytest.raises(SystemExit) as exc:
+                            run_eval.main()
+    assert exc.value.code == 3
+
+
+def test_main_warns_without_google_credentials(tmp_path, monkeypatch, caplog):
+    args = _main_args(tmp_path)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS_CONTENT", raising=False)
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    with caplog.at_level(logging.WARNING, logger="run_eval"):
+        with patch.object(run_eval, "_parse_args", return_value=args):
+            with patch.object(run_eval, "_find_lightspeed_cmd", return_value=["/bin/lightspeed-eval"]):
+                with patch.object(run_eval, "_populate_dataset", return_value=[{"turns": []}]):
+                    with patch.object(run_eval, "_run_lightspeed", return_value=0):
+                        with patch.object(run_eval, "_log_summary"):
+                            with pytest.raises(SystemExit):
+                                run_eval.main()
+    assert "no Google credentials found" in caplog.text
