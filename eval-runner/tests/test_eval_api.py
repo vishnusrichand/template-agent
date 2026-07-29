@@ -309,7 +309,7 @@ async def test_run_eval_completes_with_db_summary(cases_file, system_yaml_file, 
     with patch("eval_api._run_eval_pattern", new_callable=AsyncMock, return_value=0):
         with patch("eval_api.load_results_since", return_value=db_data):
             with patch("eval_api.write_eval_result") as mock_write:
-                await eval_api._run_eval("tool_use", auth_token="user-tok")
+                await eval_api._run_eval("tool_use", auth_token="user-tok", run_id="test-run-1")
 
     assert eval_api._status["state"] == "completed"
     assert eval_api._latest_result is not None
@@ -326,7 +326,7 @@ async def test_run_eval_setup_failure_sets_error(cases_file, tmp_path):
     eval_api.EVAL_CASES_PATH = tmp_path / "missing.yaml"
     eval_api._status = {"state": "idle", "run_id": None}
 
-    await eval_api._run_eval(None)
+    await eval_api._run_eval(None, run_id="test-run-2")
 
     assert eval_api._status["state"] == "error"
     eval_api.EVAL_CASES_PATH = orig_cases
@@ -340,7 +340,7 @@ async def test_run_eval_write_failure_still_completes(cases_file, system_yaml_fi
     with patch("eval_api._run_eval_pattern", new_callable=AsyncMock, return_value=0):
         with patch("eval_api.load_results_since", return_value={}):
             with patch("eval_api.write_eval_result", side_effect=RuntimeError("db down")):
-                await eval_api._run_eval(None)
+                await eval_api._run_eval(None, run_id="test-run-3")
 
     assert eval_api._status["state"] == "completed"
     eval_api.EVAL_OUTPUT_DIR = orig_output
@@ -405,6 +405,24 @@ def test_run_all_returns_202(api_client):
     assert resp.json()["pattern"] == "all"
 
 
+def test_trigger_run_id_propagates_to_status_and_background_task(api_client):
+    """run_id in 202 response must match _status and the _run_eval argument."""
+    captured: dict = {}
+
+    async def capture_run_eval(*args, **kwargs):
+        captured["args"] = args
+
+    with patch("eval_api._run_eval", side_effect=capture_run_eval):
+        resp = api_client.post("/evals/run", json={})
+
+    assert resp.status_code == 202
+    response_run_id = resp.json()["run_id"]
+    assert response_run_id
+    assert eval_api._status["state"] == "running"
+    assert eval_api._status["run_id"] == response_run_id
+    assert captured["args"][-1] == response_run_id
+
+
 def test_run_all_with_body_fields(api_client):
     with patch("eval_api._run_eval") as mock_run_eval:
         resp = api_client.post(
@@ -414,12 +432,13 @@ def test_run_all_with_body_fields(api_client):
     assert resp.status_code == 202
     assert "run_id" in resp.json()
     mock_run_eval.assert_called_once()
-    pattern, config_hash, org, name, auth_token = mock_run_eval.call_args[0]
+    pattern, config_hash, org, name, auth_token, run_id = mock_run_eval.call_args[0]
     assert pattern is None
     assert config_hash == "abc"
     assert org == "myorg"
     assert name == "myagent"
     assert auth_token == ""
+    assert run_id == resp.json()["run_id"]
 
 
 def test_run_all_409_when_running(api_client):

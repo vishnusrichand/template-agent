@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from eval_cases import filter_cases_by_tag, load_cases
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -150,7 +151,7 @@ def _find_eval_files(pattern: str | None) -> list[Path]:
             "No eval dataset found. Add eval cases before running evaluation."
         )
 
-    cases = yaml.safe_load(EVAL_CASES_PATH.read_text()) or []
+    cases = load_cases(EVAL_CASES_PATH)
     log.info("Loaded %d eval cases from %s", len(cases), EVAL_CASES_PATH)
 
     if pattern is None:
@@ -164,7 +165,7 @@ def _find_eval_files(pattern: str | None) -> list[Path]:
         log.info("Splitting cases into %d tag batches: %s", len(tags), tags)
         files: list[Path] = []
         for tag in tags:
-            filtered = [c for c in cases if c.get("tag") == tag]
+            filtered = filter_cases_by_tag(EVAL_CASES_PATH, tag)
             tmp = tempfile.NamedTemporaryFile(
                 mode="w", suffix=".yaml", prefix=f"eval_{tag}_", delete=False
             )
@@ -175,7 +176,7 @@ def _find_eval_files(pattern: str | None) -> list[Path]:
         return files
 
     # Specific pattern — single filtered temp file
-    filtered = [c for c in cases if c.get("tag") == pattern]
+    filtered = filter_cases_by_tag(EVAL_CASES_PATH, pattern)
     if not filtered:
         raise FileNotFoundError(
             f"No eval cases found for pattern '{pattern}'. "
@@ -294,12 +295,11 @@ async def _run_eval(
     org: str | None = None,
     name: str | None = None,
     auth_token: str = "",
+    run_id: str = "",
 ) -> None:
     """Core eval runner — invoked in background."""
     global _latest_result
 
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    _status.update({"state": "running", "run_id": run_id})
     log.info(
         "Eval run started: run_id=%s pattern=%s auth_token_present=%s",
         run_id,
@@ -508,7 +508,8 @@ async def _trigger(
         config_hash,
         bool(auth_token),
     )
-    background.add_task(_run_eval, pattern, config_hash, org, name, auth_token)
+    _status.update({"state": "running", "run_id": run_id})
+    background.add_task(_run_eval, pattern, config_hash, org, name, auth_token, run_id)
     return {
         "run_id": run_id,
         "status": "started",

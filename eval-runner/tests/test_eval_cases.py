@@ -207,15 +207,15 @@ def test_delete_case_removes_from_index(eval_dir):
 def test_filter_cases_by_tag_match(eval_dir):
     eval_cases.create_case(eval_dir, query="Q1", expected_response="A1", tag="tool_use")
     eval_cases.create_case(eval_dir, query="Q2", expected_response="A2", tag="hitl")
-    results = eval_cases.filter_cases_by_tag(eval_dir, "tool_use")
+    results = eval_cases.filter_cases_by_tag(f"{eval_dir}/eval_cases.yaml", "tool_use")
     assert len(results) == 1
     assert results[0]["tag"] == "tool_use"
 
 
 def test_filter_cases_by_tag_no_match(eval_dir):
     eval_cases.create_case(eval_dir, query="Q", expected_response="A", tag="tool_use")
-    assert eval_cases.filter_cases_by_tag(eval_dir, "hitl") == []
+    assert eval_cases.filter_cases_by_tag(f"{eval_dir}/eval_cases.yaml", "hitl") == []
 
 
 def test_filter_cases_by_tag_empty(eval_dir):
-    assert eval_cases.filter_cases_by_tag(eval_dir, "tool_use") == []
+    assert eval_cases.filter_cases_by_tag(f"{eval_dir}/eval_cases.yaml", "tool_use") == []
