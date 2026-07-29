@@ -54,9 +54,9 @@ def test_resolve_config_dir_uses_env(monkeypatch, tmp_path):
 
 def test_resolve_config_dir_falls_back_to_default(monkeypatch):
     monkeypatch.delenv("AGENT_CONFIG_DIR", raising=False)
-    result = eval_api._resolve_config_dir()
-    assert isinstance(result, str)
-    assert len(result) > 0
+    with patch.object(Path, "is_dir", return_value=False):
+        result = eval_api._resolve_config_dir()
+    assert result == "/agent-config"
 
 
 # ── _find_eval_files ──────────────────────────────────────────────────────────
@@ -256,7 +256,12 @@ async def test_run_eval_pattern_delegates_to_executor(tmp_path):
             auth_token="tok",
         )
     assert rc == 0
-    mock_sync.assert_called_once()
+    mock_sync.assert_called_once_with(
+        tmp_path / "cases.yaml",
+        tmp_path / "system.yaml",
+        tmp_path / "output",
+        "tok",
+    )
 
 
 # ── _extract_token ────────────────────────────────────────────────────────────
@@ -401,13 +406,20 @@ def test_run_all_returns_202(api_client):
 
 
 def test_run_all_with_body_fields(api_client):
-    with patch("eval_api._run_eval"):
+    with patch("eval_api._run_eval") as mock_run_eval:
         resp = api_client.post(
             "/evals/run",
             json={"config_hash": "abc", "org": "myorg", "name": "myagent"},
         )
     assert resp.status_code == 202
     assert "run_id" in resp.json()
+    mock_run_eval.assert_called_once()
+    pattern, config_hash, org, name, auth_token = mock_run_eval.call_args[0]
+    assert pattern is None
+    assert config_hash == "abc"
+    assert org == "myorg"
+    assert name == "myagent"
+    assert auth_token == ""
 
 
 def test_run_all_409_when_running(api_client):
