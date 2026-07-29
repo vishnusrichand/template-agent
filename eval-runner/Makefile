@@ -10,7 +10,7 @@
 ##   make build        - Build image only
 ##   make venv         - Create isolated venv
 
-.PHONY: local up down logs build venv deploy
+.PHONY: local up down logs build venv test deploy
 
 COMPOSE = podman-compose -f compose.yaml
 
@@ -24,6 +24,11 @@ COMPOSE = podman-compose -f compose.yaml
 	@touch .venv/.installed
 
 venv: .venv/.installed
+
+test: venv ## Run unit tests with coverage
+	@uv pip install -q --python .venv/bin/python \
+		pytest pytest-asyncio pytest-cov httpx
+	@PYTHONPATH=src .venv/bin/pytest tests/ --cov=src --cov-report=term-missing --cov-fail-under=90 -v
 
 # ── Local (venv) ─────────────────────────────────────────────────────────────
 
