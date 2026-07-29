@@ -278,6 +278,16 @@ def test_collect_from_events_tool_result_captured_as_context():
     assert "BMI result: 22.9" in ctxs
 
 
+def test_collect_from_events_tool_message_with_empty_content():
+    events = [
+        ("updates", {"agent": {"messages": [
+            {"type": "tool", "content": ""}
+        ]}})
+    ]
+    texts, tcs, ctxs = run_eval._collect_from_events(events)
+    assert ctxs == []
+
+
 def test_collect_from_events_deduplicates_tool_calls_by_run_id():
     events = [
         ("events", {"event": "on_tool_start", "name": "calc",

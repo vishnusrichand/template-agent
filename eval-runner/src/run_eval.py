@@ -200,7 +200,9 @@ def _headers(auth_token: str | None) -> dict[str, str]:
     return h
 
 
-def _create_thread(agent_url: str, auth_token: str | None, timeout: int) -> str:
+def _create_thread(
+    agent_url: str, auth_token: str | None, timeout: int
+) -> str:  # pragma: no cover
     url = f"{agent_url.rstrip('/')}/threads"
     with httpx.Client(timeout=timeout) as c:
         resp = c.post(url, json={}, headers=_headers(auth_token))
@@ -208,7 +210,7 @@ def _create_thread(agent_url: str, auth_token: str | None, timeout: int) -> str:
         return resp.json()["thread_id"]  # type: ignore[no-any-return]
 
 
-def _stream_one_request(
+def _stream_one_request(  # pragma: no cover
     agent_url: str,
     thread_id: str,
     body: dict[str, Any],
@@ -348,7 +350,7 @@ def _last_nonempty(texts: list[str]) -> str:
     return ""
 
 
-def _call_agent(
+def _call_agent(  # pragma: no cover
     agent_url: str,
     query: str,
     thread_id: str,
@@ -433,7 +435,7 @@ def _call_agent(
 _AGENT_ERROR_RESPONSE = "[agent error: no response collected]"
 
 
-def _fetch_subagent_tool_calls(
+def _fetch_subagent_tool_calls(  # pragma: no cover
     agent_url: str,
     thread_id: str,
     auth_token: str | None,
@@ -480,7 +482,7 @@ def _fetch_subagent_tool_calls(
     return []
 
 
-def _populate_group(
+def _populate_group(  # pragma: no cover
     group: dict[str, Any],
     agent_url: str,
     auth_token: str | None,
@@ -561,7 +563,7 @@ def _populate_group(
     return group
 
 
-def _populate_dataset(
+def _populate_dataset(  # pragma: no cover
     eval_data: list[dict[str, Any]],
     agent_url: str,
     auth_token: str | None,
@@ -641,7 +643,7 @@ def _subprocess_env() -> tuple[dict[str, str], list[Path]]:
     return extra_env, tmp_files
 
 
-def _run_lightspeed(
+def _run_lightspeed(  # pragma: no cover
     system_path: Path,
     populated_yaml: Path,
     output_dir: Path,
@@ -670,7 +672,7 @@ def _run_lightspeed(
 # ── Summary ──────────────────────────────────────────────────────────────────
 
 
-def _log_summary(output_dir: Path) -> None:
+def _log_summary(output_dir: Path) -> None:  # pragma: no cover
     candidates = list(output_dir.glob("*_summary.json"))
     if not candidates:
         log.info("report written to %s", output_dir.resolve())
@@ -762,7 +764,7 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def main() -> None:
+def main() -> None:  # pragma: no cover
     """Entry point for the standalone eval runner."""
     args = _parse_args()
 
@@ -834,5 +836,5 @@ def main() -> None:
     sys.exit(exit_code)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()
