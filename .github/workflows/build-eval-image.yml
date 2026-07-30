@@ -13,6 +13,7 @@ permissions:
   contents: write
   packages: write
   security-events: write
+  variables: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -135,6 +136,7 @@ jobs:
           retention-days: 30
 
       - name: Push multi-platform image
+        id: push
         uses: docker/build-push-action@v5
         with:
           context: ./eval-runner
@@ -146,6 +148,20 @@ jobs:
           cache-to: type=gha,mode=max
           platforms: linux/amd64,linux/arm64
 
+      - name: Update last-good-eval repo variables
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh variable set LAST_GOOD_EVAL_IMAGE \
+            --body "ghcr.io/${{ github.repository }}-eval:${{ steps.version.outputs.version }}" \
+            --repo ${{ github.repository }}
+          gh variable set LAST_GOOD_EVAL_DIGEST \
+            --body "${{ steps.push.outputs.digest }}" \
+            --repo ${{ github.repository }}
+          gh variable set LAST_GOOD_EVAL_SHA \
+            --body "${{ github.sha }}" \
+            --repo ${{ github.repository }}
+
       - name: Create deployment package metadata
         run: |
           cat > eval-runner/deployment/release-info.json <<EOF
@@ -155,6 +171,7 @@ jobs:
             "git_sha": "${{ github.sha }}",
             "build_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "container_image": "ghcr.io/${{ github.repository }}-eval:${{ steps.version.outputs.version }}",
+            "container_digest": "${{ steps.push.outputs.digest }}",
             "repository": "${{ github.repository }}"
           }
           EOF
@@ -168,12 +185,41 @@ jobs:
           echo "Created package: ${{ steps.version.outputs.package_name }}"
           ls -lh ${{ steps.version.outputs.package_name }}
 
+      - name: Generate checksums
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          FILES="${{ steps.version.outputs.package_name }}"
+          [ -f sbom-eval.cdx.json ] && FILES="$FILES sbom-eval.cdx.json"
+          [ -f trivy-report-eval.json ] && FILES="$FILES trivy-report-eval.json"
+          sha256sum $FILES > SHA256SUMS-eval.txt
+          cat SHA256SUMS-eval.txt
+
       - name: Create GitHub Release (for tags only)
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
         with:
-          files: ${{ steps.version.outputs.package_name }}
-          generate_release_notes: true
+          files: |
+            ${{ steps.version.outputs.package_name }}
+            SHA256SUMS-eval.txt
+            sbom-eval.cdx.json
+            trivy-report-eval.json
+          body: |
+            ## Eval Runner Image
+
+            ```bash
+            docker pull ghcr.io/${{ github.repository }}-eval:${{ steps.version.outputs.version }}
+            ```
+
+            **Digest:** `${{ steps.push.outputs.digest }}`
+
+            ## Artifacts
+
+            | File | Description |
+            |------|-------------|
+            | `eval-runner-deployment.zip` | Eval runner deployment manifests |
+            | `sbom-eval.cdx.json` | CycloneDX SBOM for eval runner |
+            | `trivy-report-eval.json` | Vulnerability scan results |
+            | `SHA256SUMS-eval.txt` | SHA-256 checksums for eval artifacts |
           draft: false
           prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
         env:
@@ -181,7 +227,7 @@ jobs:
 
       - name: Upload deployment package as artifact (for branch builds)
         if: "!startsWith(github.ref, 'refs/tags/')"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ steps.version.outputs.package_name }}
           path: ${{ steps.version.outputs.package_name }}

@@ -214,6 +214,13 @@ jobs:
       - name: Create deployment package metadata
         if: github.event_name != 'pull_request'
         run: |
+          EVAL_IMAGE="${{ vars.LAST_GOOD_EVAL_IMAGE }}"
+          EVAL_DIGEST="${{ vars.LAST_GOOD_EVAL_DIGEST }}"
+          EVAL_SHA="${{ vars.LAST_GOOD_EVAL_SHA }}"
+          EVAL_IS_CURRENT="false"
+          if [ "${EVAL_SHA}" = "${{ github.sha }}" ]; then
+            EVAL_IS_CURRENT="true"
+          fi
           cat > deployment/release-info.json <<EOF
           {
             "version": "${{ steps.version.outputs.version }}",
@@ -223,7 +230,13 @@ jobs:
             "container_image": "ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}",
             "container_digest": "${{ steps.push.outputs.digest }}",
             "signed": ${{ steps.sign.outputs.signed || false }},
-            "repository": "${{ github.repository }}"
+            "repository": "${{ github.repository }}",
+            "eval_runner": {
+              "container_image": "${EVAL_IMAGE}",
+              "container_digest": "${EVAL_DIGEST}",
+              "git_sha": "${EVAL_SHA}",
+              "is_current_commit": ${EVAL_IS_CURRENT}
+            }
           }
           EOF
           cat deployment/release-info.json
@@ -268,7 +281,7 @@ jobs:
         with:
           files: ${{ steps.release-files.outputs.files }}
           body: |
-            ## Container Image
+            ## Agent Image
 
             ```bash
             docker pull ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}
@@ -276,6 +289,16 @@ jobs:
 
             **Digest:** `${{ steps.push.outputs.digest }}`
             **Signed:** ${{ steps.sign.outputs.signed == 'true' && 'Yes' || 'No (signing failed, see workflow logs)' }}
+
+            ## Eval Runner Image (last successful build)
+
+            ```bash
+            docker pull ${{ vars.LAST_GOOD_EVAL_IMAGE }}
+            ```
+
+            **Digest:** `${{ vars.LAST_GOOD_EVAL_DIGEST }}`
+            **Built from commit:** `${{ vars.LAST_GOOD_EVAL_SHA }}`
+            ${{ vars.LAST_GOOD_EVAL_SHA == github.sha && '> Same commit as this release.' || '> ⚠️ Built from a previous commit — eval build may have failed on this release commit.' }}
 
             ## Verify
 
