@@ -3,6 +3,8 @@ FROM registry.access.redhat.com/hi/python:${PYTHON_TAG}
 
 WORKDIR /app
 
+RUN dnf install -y git && dnf clean all
+
 # Isolated venv — no pyyaml / langchain-google-genai conflict with template-agent.
 RUN pip install --no-cache-dir \
     "lightspeed-evaluation @ git+https://github.com/lightspeed-core/lightspeed-evaluation.git@v0.7.0" \
