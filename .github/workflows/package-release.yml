@@ -55,9 +55,61 @@ jobs:
           echo "signed=$(jq -r '.signed' deployment/last-good-agent.json)" >> $GITHUB_OUTPUT
           cat deployment/last-good-agent.json
 
+      - name: Wait for eval workflow on same commit
+        id: eval-wait
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
+          TIMEOUT=1800  # 30 minutes
+          INTERVAL=30
+          ELAPSED=0
+
+          echo "Waiting for eval workflow to complete on commit ${HEAD_SHA}..."
+
+          while [ $ELAPSED -lt $TIMEOUT ]; do
+            RUN=$(gh api \
+              "repos/${{ github.repository }}/actions/workflows/build-eval-image.yml/runs?head_sha=${HEAD_SHA}&per_page=1" \
+              --jq '.workflow_runs[0] | {id: .id, status: .status, conclusion: .conclusion}' 2>/dev/null || echo "null")
+
+            if [ "$RUN" = "null" ] || [ -z "$RUN" ]; then
+              echo "No eval run found for this commit yet, waiting..."
+            else
+              STATUS=$(echo "$RUN" | jq -r '.status')
+              CONCLUSION=$(echo "$RUN" | jq -r '.conclusion')
+              RUN_ID=$(echo "$RUN" | jq -r '.id')
+              echo "Eval run ${RUN_ID}: status=${STATUS} conclusion=${CONCLUSION}"
+
+              if [ "$STATUS" = "completed" ]; then
+                echo "conclusion=${CONCLUSION}" >> $GITHUB_OUTPUT
+                echo "run_id=${RUN_ID}" >> $GITHUB_OUTPUT
+                break
+              fi
+            fi
+
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+
+          if [ $ELAPSED -ge $TIMEOUT ]; then
+            echo "::warning::Eval workflow did not complete within ${TIMEOUT}s — using last good eval"
+            echo "conclusion=timed_out" >> $GITHUB_OUTPUT
+          fi
+
       - name: Read eval build info (last good)
         id: eval
         run: |
+          EVAL_CONCLUSION="${{ steps.eval-wait.outputs.conclusion }}"
+          HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
+
+          echo "Eval conclusion: ${EVAL_CONCLUSION}"
+
+          # If eval succeeded on this commit, pull latest code to get fresh last-good-eval.json
+          if [ "$EVAL_CONCLUSION" = "success" ]; then
+            git fetch origin ${{ github.event.workflow_run.head_branch }}
+            git checkout origin/${{ github.event.workflow_run.head_branch }} -- eval-runner/deployment/last-good-eval.json 2>/dev/null || true
+          fi
+
           if [ ! -f eval-runner/deployment/last-good-eval.json ]; then
             echo "::warning::No eval build recorded yet — eval info will be empty"
             echo "image="    >> $GITHUB_OUTPUT
@@ -66,9 +118,10 @@ jobs:
             echo "is_current=false" >> $GITHUB_OUTPUT
             exit 0
           fi
+
           EVAL_SHA=$(jq -r '.git_sha' eval-runner/deployment/last-good-eval.json)
           IS_CURRENT="false"
-          [ "$EVAL_SHA" = "${{ github.event.workflow_run.head_sha }}" ] && IS_CURRENT="true"
+          [ "$EVAL_SHA" = "$HEAD_SHA" ] && IS_CURRENT="true"
 
           echo "image=$(jq -r '.container_image' eval-runner/deployment/last-good-eval.json)"  >> $GITHUB_OUTPUT
           echo "digest=$(jq -r '.container_digest' eval-runner/deployment/last-good-eval.json)" >> $GITHUB_OUTPUT
