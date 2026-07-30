@@ -563,23 +563,29 @@ async def _fire_eval_run(config_hash: str, auth_token: str = "") -> None:
         log.warning("eval_runner_call_failed: %s", exc)
 
 
-def _require_eval_cases() -> None:
-    """Raise HTTPException(400) if eval_cases.yaml is missing."""
+def _require_eval_files() -> None:
+    """Raise HTTPException(400) if eval_cases.yaml or system.yaml is missing."""
     from fastapi import HTTPException
 
     config_dir = os.environ.get("CONFIG_PATH", "config/agent")
     eval_cases = Path(f"{config_dir}/evals/lightspeed-agent/eval_cases.yaml")
+    system_yaml = Path(f"{config_dir}/evals/lightspeed-agent/system.yaml")
     if not eval_cases.exists():
         raise HTTPException(
             status_code=400,
             detail="No eval dataset found. Add eval cases before running evaluation.",
+        )
+    if not system_yaml.exists():
+        raise HTTPException(
+            status_code=400,
+            detail="Eval system config (system.yaml) not found. Ensure the agent config is mounted correctly.",
         )
 
 
 @eval_mgmt_router.post("/trigger")
 async def trigger_eval(request: Request) -> dict[str, Any]:
     """Cache-first eval trigger. Returns cached result or sets in_progress."""
-    _require_eval_cases()
+    _require_eval_files()
 
     config_hash = _get_config_hash()
 
@@ -616,7 +622,7 @@ async def trigger_eval(request: Request) -> dict[str, Any]:
 @eval_mgmt_router.post("/force-trigger")
 async def force_trigger_eval(request: Request) -> dict[str, Any]:
     """Force a fresh eval run, bypassing cache."""
-    _require_eval_cases()
+    _require_eval_files()
 
     config_hash = _get_config_hash()
 
