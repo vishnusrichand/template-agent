@@ -10,6 +10,7 @@ on:
 permissions:
   contents: write
   actions: read
+  packages: write
 
 jobs:
   package:
@@ -134,6 +135,17 @@ jobs:
           echo "sha=$(jq -r '.git_sha' eval-info/last-good-eval.json)"              >> $GITHUB_OUTPUT
           echo "is_current=${{ steps.eval-run.outputs.is_current }}"                >> $GITHUB_OUTPUT
 
+      - name: Re-tag eval image with release version (tags only)
+        if: steps.ctx.outputs.is_tag == 'true' && steps.eval.outputs.image != ''
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          EVAL_IMAGE="${{ steps.eval.outputs.image }}"
+          RELEASE_TAG="ghcr.io/${{ github.repository }}-eval:${{ steps.ctx.outputs.version }}"
+          docker pull "${EVAL_IMAGE}"
+          docker tag  "${EVAL_IMAGE}" "${RELEASE_TAG}"
+          docker push "${RELEASE_TAG}"
+          echo "Re-tagged ${EVAL_IMAGE} → ${RELEASE_TAG}"
+
       - name: Create combined release-info.json
         run: |
           mkdir -p deployment
@@ -149,7 +161,7 @@ jobs:
               "signed": ${{ steps.agent.outputs.signed }}
             },
             "eval_runner": {
-              "container_image": "${{ steps.eval.outputs.image }}",
+              "container_image": "${{ steps.ctx.outputs.is_tag == 'true' && steps.eval.outputs.image != '' && format('ghcr.io/{0}-eval:{1}', github.repository, steps.ctx.outputs.version) || steps.eval.outputs.image }}",
               "container_digest": "${{ steps.eval.outputs.digest }}",
               "git_sha": "${{ steps.eval.outputs.sha }}",
               "is_current_commit": ${{ steps.eval.outputs.is_current || false }}
