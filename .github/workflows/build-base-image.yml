@@ -211,57 +211,29 @@ jobs:
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
 
-      - name: Fetch last successful eval build info
+      - name: Record last-good-agent build
         if: github.event_name != 'pull_request'
-        id: eval-info
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Find the last successful run of the eval workflow on this branch
-          LAST_RUN=$(gh api \
-            "repos/${{ github.repository }}/actions/workflows/build-eval-image.yml/runs?branch=${{ github.ref_name }}&status=success&per_page=1" \
-            --jq '.workflow_runs[0]')
-
-          if [ -z "$LAST_RUN" ] || [ "$LAST_RUN" = "null" ]; then
-            echo "No successful eval build found"
-            echo "eval_image=" >> $GITHUB_OUTPUT
-            echo "eval_digest=" >> $GITHUB_OUTPUT
-            echo "eval_sha=" >> $GITHUB_OUTPUT
-            echo "eval_is_current=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          EVAL_SHA=$(echo "$LAST_RUN" | jq -r '.head_sha')
-          # Derive image tag from sha (same logic as eval workflow)
-          SHORT_SHA="${EVAL_SHA::7}"
-          EVAL_IMAGE="ghcr.io/${{ github.repository }}-eval:${{ github.ref_name }}-${SHORT_SHA}"
-
-          # Get digest from last-good-eval.json if it was committed
-          EVAL_DIGEST=""
-          if [ -f eval-runner/deployment/last-good-eval.json ]; then
-            FILE_SHA=$(jq -r '.git_sha' eval-runner/deployment/last-good-eval.json)
-            if [ "$FILE_SHA" = "$EVAL_SHA" ]; then
-              EVAL_DIGEST=$(jq -r '.container_digest' eval-runner/deployment/last-good-eval.json)
-              EVAL_IMAGE=$(jq -r '.container_image' eval-runner/deployment/last-good-eval.json)
-            fi
-          fi
-
-          IS_CURRENT="false"
-          [ "$EVAL_SHA" = "${{ github.sha }}" ] && IS_CURRENT="true"
-
-          echo "eval_image=${EVAL_IMAGE}" >> $GITHUB_OUTPUT
-          echo "eval_digest=${EVAL_DIGEST}" >> $GITHUB_OUTPUT
-          echo "eval_sha=${EVAL_SHA}" >> $GITHUB_OUTPUT
-          echo "eval_is_current=${IS_CURRENT}" >> $GITHUB_OUTPUT
-          echo "Last good eval: ${EVAL_IMAGE} (sha=${EVAL_SHA}, current=${IS_CURRENT})"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          cat > deployment/last-good-agent.json <<EOF
+          {
+            "container_image": "ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}",
+            "container_digest": "${{ steps.push.outputs.digest }}",
+            "git_sha": "${{ github.sha }}",
+            "git_ref": "${{ github.ref }}",
+            "version": "${{ steps.version.outputs.version }}",
+            "signed": ${{ steps.sign.outputs.signed || false }},
+            "build_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+          git add deployment/last-good-agent.json
+          git diff --cached --quiet || git commit -m "chore(ci): update last-good-agent build [skip ci]"
+          git push origin HEAD:${{ github.ref_name }}
 
       - name: Create deployment package metadata
         if: github.event_name != 'pull_request'
         run: |
-          EVAL_IMAGE="${{ steps.eval-info.outputs.eval_image }}"
-          EVAL_DIGEST="${{ steps.eval-info.outputs.eval_digest }}"
-          EVAL_SHA="${{ steps.eval-info.outputs.eval_sha }}"
-          EVAL_IS_CURRENT="${{ steps.eval-info.outputs.eval_is_current }}"
           cat > deployment/release-info.json <<EOF
           {
             "version": "${{ steps.version.outputs.version }}",
@@ -271,13 +243,7 @@ jobs:
             "container_image": "ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}",
             "container_digest": "${{ steps.push.outputs.digest }}",
             "signed": ${{ steps.sign.outputs.signed || false }},
-            "repository": "${{ github.repository }}",
-            "eval_runner": {
-              "container_image": "${EVAL_IMAGE}",
-              "container_digest": "${EVAL_DIGEST}",
-              "git_sha": "${EVAL_SHA}",
-              "is_current_commit": ${EVAL_IS_CURRENT}
-            }
+            "repository": "${{ github.repository }}"
           }
           EOF
           cat deployment/release-info.json
@@ -322,7 +288,7 @@ jobs:
         with:
           files: ${{ steps.release-files.outputs.files }}
           body: |
-            ## Agent Image
+            ## Container Image
 
             ```bash
             docker pull ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}
@@ -330,10 +296,6 @@ jobs:
 
             **Digest:** `${{ steps.push.outputs.digest }}`
             **Signed:** ${{ steps.sign.outputs.signed == 'true' && 'Yes' || 'No (signing failed, see workflow logs)' }}
-
-            ## Eval Runner Image (last successful build)
-
-            See `eval-runner/deployment/last-good-eval.json` for the pinned eval image reference and digest.
 
             ## Verify
 

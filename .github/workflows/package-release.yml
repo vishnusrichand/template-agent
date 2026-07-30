@@ -1,0 +1,162 @@
+name: Package Release
+
+# Triggered when the agent build succeeds.
+# Agent success = gate. Eval success = best-effort (falls back to last good).
+on:
+  workflow_run:
+    workflows: ["Build and Push Base Image"]
+    types: [completed]
+
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  package:
+    # Only run when agent build succeeded
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout at agent build commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Determine build context
+        id: ctx
+        run: |
+          HEAD_BRANCH="${{ github.event.workflow_run.head_branch }}"
+          HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
+          SHORT_SHA="${HEAD_SHA::7}"
+
+          # Detect tag vs branch by checking if head_branch looks like a semver tag
+          if git tag --points-at "$HEAD_SHA" | grep -qE '^v?[0-9]+\.[0-9]+'; then
+            TAG=$(git tag --points-at "$HEAD_SHA" | grep -E '^v?[0-9]+\.[0-9]+' | head -1)
+            echo "is_tag=true"  >> $GITHUB_OUTPUT
+            echo "version=${TAG}" >> $GITHUB_OUTPUT
+          else
+            echo "is_tag=false" >> $GITHUB_OUTPUT
+            echo "version=${HEAD_BRANCH}-${SHORT_SHA}" >> $GITHUB_OUTPUT
+          fi
+          echo "head_sha=${HEAD_SHA}" >> $GITHUB_OUTPUT
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "head_branch=${HEAD_BRANCH}" >> $GITHUB_OUTPUT
+
+      - name: Read agent build info
+        id: agent
+        run: |
+          if [ ! -f deployment/last-good-agent.json ]; then
+            echo "::error::deployment/last-good-agent.json not found — agent did not record its build info"
+            exit 1
+          fi
+          echo "image=$(jq -r '.container_image' deployment/last-good-agent.json)" >> $GITHUB_OUTPUT
+          echo "digest=$(jq -r '.container_digest' deployment/last-good-agent.json)" >> $GITHUB_OUTPUT
+          echo "signed=$(jq -r '.signed' deployment/last-good-agent.json)" >> $GITHUB_OUTPUT
+          cat deployment/last-good-agent.json
+
+      - name: Read eval build info (last good)
+        id: eval
+        run: |
+          if [ ! -f eval-runner/deployment/last-good-eval.json ]; then
+            echo "::warning::No eval build recorded yet — eval info will be empty"
+            echo "image="    >> $GITHUB_OUTPUT
+            echo "digest="   >> $GITHUB_OUTPUT
+            echo "sha="      >> $GITHUB_OUTPUT
+            echo "is_current=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          EVAL_SHA=$(jq -r '.git_sha' eval-runner/deployment/last-good-eval.json)
+          IS_CURRENT="false"
+          [ "$EVAL_SHA" = "${{ github.event.workflow_run.head_sha }}" ] && IS_CURRENT="true"
+
+          echo "image=$(jq -r '.container_image' eval-runner/deployment/last-good-eval.json)"  >> $GITHUB_OUTPUT
+          echo "digest=$(jq -r '.container_digest' eval-runner/deployment/last-good-eval.json)" >> $GITHUB_OUTPUT
+          echo "sha=${EVAL_SHA}" >> $GITHUB_OUTPUT
+          echo "is_current=${IS_CURRENT}" >> $GITHUB_OUTPUT
+          echo "Eval image: $(jq -r '.container_image' eval-runner/deployment/last-good-eval.json) (current=${IS_CURRENT})"
+
+      - name: Create combined release-info.json
+        run: |
+          cat > deployment/release-info.json <<EOF
+          {
+            "version": "${{ steps.ctx.outputs.version }}",
+            "git_ref": "${{ github.event.workflow_run.head_branch }}",
+            "git_sha": "${{ steps.ctx.outputs.head_sha }}",
+            "build_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "agent": {
+              "container_image": "${{ steps.agent.outputs.image }}",
+              "container_digest": "${{ steps.agent.outputs.digest }}",
+              "signed": ${{ steps.agent.outputs.signed }}
+            },
+            "eval_runner": {
+              "container_image": "${{ steps.eval.outputs.image }}",
+              "container_digest": "${{ steps.eval.outputs.digest }}",
+              "git_sha": "${{ steps.eval.outputs.sha }}",
+              "is_current_commit": ${{ steps.eval.outputs.is_current || false }}
+            }
+          }
+          EOF
+          cat deployment/release-info.json
+
+      - name: Create deployment package
+        run: |
+          cd deployment
+          zip -r ../deployment.zip . -x "*.git*"
+          cd ..
+
+      - name: Generate checksums
+        run: |
+          FILES="deployment.zip"
+          [ -f sbom.cdx.json ]         && FILES="$FILES sbom.cdx.json"
+          [ -f trivy-report.json ]     && FILES="$FILES trivy-report.json"
+          sha256sum $FILES > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload combined package as artifact (branch builds)
+        if: steps.ctx.outputs.is_tag == 'false'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-package-${{ steps.ctx.outputs.version }}
+          path: |
+            deployment.zip
+            SHA256SUMS.txt
+          retention-days: 30
+
+      - name: Create GitHub Release (tags only)
+        if: steps.ctx.outputs.is_tag == 'true'
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+        with:
+          tag_name: ${{ steps.ctx.outputs.version }}
+          files: |
+            deployment.zip
+            SHA256SUMS.txt
+          body: |
+            ## Agent Image
+
+            ```bash
+            docker pull ${{ steps.agent.outputs.image }}
+            ```
+
+            **Digest:** `${{ steps.agent.outputs.digest }}`
+            **Signed:** ${{ steps.agent.outputs.signed == 'true' && 'Yes' || 'No' }}
+
+            ## Eval Runner Image${{ steps.eval.outputs.is_current != 'true' && ' ⚠️ previous successful build' || '' }}
+
+            ```bash
+            docker pull ${{ steps.eval.outputs.image }}
+            ```
+
+            **Digest:** `${{ steps.eval.outputs.digest }}`
+            ${{ steps.eval.outputs.is_current != 'true' && format('> Built from commit `{0}` — eval build failed or is still running on this release commit.', steps.eval.outputs.sha) || '> Built from this release commit.' }}
+
+            ## Artifacts
+
+            | File | Description |
+            |------|-------------|
+            | `deployment.zip` | Combined deployment manifests with agent + eval image references |
+            | `SHA256SUMS.txt` | SHA-256 checksums |
+          draft: false
+          prerelease: ${{ contains(steps.ctx.outputs.version, 'alpha') || contains(steps.ctx.outputs.version, 'beta') || contains(steps.ctx.outputs.version, 'rc') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
