@@ -125,6 +125,10 @@ class Settings(BaseSettings):
     OTEL_AUTH_TOKEN: str = Field(default="", repr=False)
     OTEL_METRIC_EXPORT_INTERVAL_MILLIS: int = Field(default=10000)
 
+    # ── PII Middleware ────────────────────────────────────────────────────
+    PII_HASH_KEY: str = Field(default="", repr=False)
+    PII_TOKEN_MAP_TTL_DAYS: int = Field(default=7, ge=1, le=365)
+
     def resolved_otel_traces_endpoint(self) -> str:
         """Return the configured OTLP traces exporter endpoint."""
         return self.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
@@ -183,6 +187,7 @@ class Settings(BaseSettings):
         if self.DEPLOYED_AGENT_NAME:
             return self.DEPLOYED_AGENT_NAME
         from deep_agent.src.agent.config import agent_config
+
         return agent_config.get_name()
 
     @property
