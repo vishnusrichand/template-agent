@@ -158,12 +158,30 @@ jobs:
           EOF
           cat deployment/release-info.json
 
-      - name: Create deployment package
+      - name: Download eval deployment package artifact
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: eval-runner-deployment.zip
+          run-id: ${{ steps.eval-run.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: eval-artifacts
+
+      - name: Create deployment packages
         run: |
           cd deployment
           zip -r ../deployment.zip . -x "*.git*"
           cd ..
-          sha256sum deployment.zip > SHA256SUMS.txt
+
+          FILES="deployment.zip"
+
+          # Include eval deployment package if it was downloaded
+          if [ -f eval-artifacts/eval-runner-deployment.zip ]; then
+            cp eval-artifacts/eval-runner-deployment.zip .
+            FILES="$FILES eval-runner-deployment.zip"
+          fi
+
+          sha256sum $FILES > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: Upload combined package as artifact (branch builds)
@@ -173,6 +191,7 @@ jobs:
           name: release-package-${{ steps.ctx.outputs.version }}
           path: |
             deployment.zip
+            eval-runner-deployment.zip
             SHA256SUMS.txt
           retention-days: 30
 
@@ -183,6 +202,7 @@ jobs:
           tag_name: ${{ steps.ctx.outputs.version }}
           files: |
             deployment.zip
+            eval-runner-deployment.zip
             SHA256SUMS.txt
           body: |
             ## Agent Image
@@ -207,7 +227,8 @@ jobs:
 
             | File | Description |
             |------|-------------|
-            | `deployment.zip` | Deployment manifests with agent + eval image references |
+            | `deployment.zip` | Agent deployment manifests + combined release-info.json |
+            | `eval-runner-deployment.zip` | Eval runner deployment manifests |
             | `SHA256SUMS.txt` | SHA-256 checksums |
           draft: false
           prerelease: ${{ contains(steps.ctx.outputs.version, 'alpha') || contains(steps.ctx.outputs.version, 'beta') || contains(steps.ctx.outputs.version, 'rc') }}
