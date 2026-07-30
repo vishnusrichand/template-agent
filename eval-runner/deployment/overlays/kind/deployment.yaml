@@ -37,8 +37,6 @@ spec:
               value: "default"
             - name: AI_PLATFORM_AGENT_NAME
               value: "template-agent"
-            - name: ENABLE_AUTH
-              value: "false"
             - name: POSTGRES_HOST
               valueFrom:
                 configMapKeyRef:

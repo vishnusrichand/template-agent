@@ -28,3 +28,16 @@ spec:
       ports:
         - protocol: TCP
           port: 8099
+    # Allow KEDA HTTP add-on interceptor to forward buffered requests after scale-up.
+    # The interceptor runs in the keda (or keda-add-ons) namespace and proxies
+    # the original caller's request to this pod once it becomes Ready.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: keda
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: keda-add-ons
+      ports:
+        - protocol: TCP
+          port: 8099

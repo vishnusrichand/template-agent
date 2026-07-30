@@ -48,13 +48,6 @@ spec:
             - name: AI_PLATFORM_AGENT_NAME
               value: "template-agent"
 
-            # Auth
-            - name: ENABLE_AUTH
-              valueFrom:
-                configMapKeyRef:
-                  name: agent-config
-                  key: ENABLE_AUTH
-
             # PostgreSQL — shared with agent pod (results written here)
             - name: POSTGRES_HOST
               valueFrom:
