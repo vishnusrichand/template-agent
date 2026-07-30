@@ -13,7 +13,6 @@ permissions:
   contents: write
   packages: write
   security-events: write
-  actions: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -148,19 +147,24 @@ jobs:
           cache-to: type=gha,mode=max
           platforms: linux/amd64,linux/arm64
 
-      - name: Update last-good-eval repo variables
+      - name: Record last-good-eval build
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh variable set LAST_GOOD_EVAL_IMAGE \
-            --body "ghcr.io/${{ github.repository }}-eval:${{ steps.version.outputs.version }}" \
-            --repo ${{ github.repository }}
-          gh variable set LAST_GOOD_EVAL_DIGEST \
-            --body "${{ steps.push.outputs.digest }}" \
-            --repo ${{ github.repository }}
-          gh variable set LAST_GOOD_EVAL_SHA \
-            --body "${{ github.sha }}" \
-            --repo ${{ github.repository }}
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          cat > eval-runner/deployment/last-good-eval.json <<EOF
+          {
+            "container_image": "ghcr.io/${{ github.repository }}-eval:${{ steps.version.outputs.version }}",
+            "container_digest": "${{ steps.push.outputs.digest }}",
+            "git_sha": "${{ github.sha }}",
+            "git_ref": "${{ github.ref }}",
+            "build_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+          git add eval-runner/deployment/last-good-eval.json
+          git diff --cached --quiet || git commit -m "chore(ci): update last-good-eval build [skip ci]"
+          git push origin HEAD:${{ github.ref_name }}
 
       - name: Create deployment package metadata
         run: |

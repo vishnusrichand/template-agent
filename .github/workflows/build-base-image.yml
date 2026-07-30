@@ -214,12 +214,17 @@ jobs:
       - name: Create deployment package metadata
         if: github.event_name != 'pull_request'
         run: |
-          EVAL_IMAGE="${{ vars.LAST_GOOD_EVAL_IMAGE }}"
-          EVAL_DIGEST="${{ vars.LAST_GOOD_EVAL_DIGEST }}"
-          EVAL_SHA="${{ vars.LAST_GOOD_EVAL_SHA }}"
+          EVAL_IMAGE=""
+          EVAL_DIGEST=""
+          EVAL_SHA=""
           EVAL_IS_CURRENT="false"
-          if [ "${EVAL_SHA}" = "${{ github.sha }}" ]; then
-            EVAL_IS_CURRENT="true"
+          if [ -f eval-runner/deployment/last-good-eval.json ]; then
+            EVAL_IMAGE=$(jq -r '.container_image' eval-runner/deployment/last-good-eval.json)
+            EVAL_DIGEST=$(jq -r '.container_digest' eval-runner/deployment/last-good-eval.json)
+            EVAL_SHA=$(jq -r '.git_sha' eval-runner/deployment/last-good-eval.json)
+            if [ "${EVAL_SHA}" = "${{ github.sha }}" ]; then
+              EVAL_IS_CURRENT="true"
+            fi
           fi
           cat > deployment/release-info.json <<EOF
           {
@@ -292,13 +297,7 @@ jobs:
 
             ## Eval Runner Image (last successful build)
 
-            ```bash
-            docker pull ${{ vars.LAST_GOOD_EVAL_IMAGE }}
-            ```
-
-            **Digest:** `${{ vars.LAST_GOOD_EVAL_DIGEST }}`
-            **Built from commit:** `${{ vars.LAST_GOOD_EVAL_SHA }}`
-            ${{ vars.LAST_GOOD_EVAL_SHA == github.sha && '> Same commit as this release.' || '> ⚠️ Built from a previous commit — eval build may have failed on this release commit.' }}
+            See `eval-runner/deployment/last-good-eval.json` for the pinned eval image reference and digest.
 
             ## Verify
 
