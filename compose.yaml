@@ -84,7 +84,6 @@ services:
       - POSTGRES_DB=template_agent
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=postgres
-      - DATABASE_URL=postgresql://postgres:postgres@pgvector:5432/template_agent
       - REDIS_URL=redis://redis:6379/0
       - REDIS_BROKER_ENABLED=true
       # Custom CA — mount a PEM at ./certs/ca.pem to trust corporate CAs

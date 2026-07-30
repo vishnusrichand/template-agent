@@ -47,8 +47,6 @@ local: venv ## Run via venv — fast local dev, requires make local in parent di
 	POSTGRES_PASSWORD=postgres \
 	AGENT_HOST=http://127.0.0.1:5002 \
 	AGENT_CONFIG_DIR=../config/agent \
-	VLLM_BASE_URL=$${VLLM_BASE_URL} \
-	VLLM_API_KEY=$${VLLM_API_KEY} \
 	PYTHONPATH=src \
 	.venv/bin/uvicorn eval_api:app --port 8099
 
