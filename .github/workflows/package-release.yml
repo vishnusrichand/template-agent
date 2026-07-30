@@ -1,7 +1,7 @@
 name: Package Release
 
-# Triggered when the agent build succeeds.
-# Agent success = gate. Eval success = best-effort (falls back to last good).
+# Triggered when the agent build completes.
+# Agent success = gate. Eval is waited on; uses last good on failure.
 on:
   workflow_run:
     workflows: ["Build and Push Base Image"]
@@ -9,11 +9,10 @@ on:
 
 permissions:
   contents: write
-  packages: read
+  actions: read
 
 jobs:
   package:
-    # Only run when agent build succeeded
     if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
 
@@ -26,34 +25,35 @@ jobs:
       - name: Determine build context
         id: ctx
         run: |
-          HEAD_BRANCH="${{ github.event.workflow_run.head_branch }}"
           HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
+          HEAD_BRANCH="${{ github.event.workflow_run.head_branch }}"
           SHORT_SHA="${HEAD_SHA::7}"
-
-          # Detect tag vs branch by checking if head_branch looks like a semver tag
           if git tag --points-at "$HEAD_SHA" | grep -qE '^v?[0-9]+\.[0-9]+'; then
             TAG=$(git tag --points-at "$HEAD_SHA" | grep -E '^v?[0-9]+\.[0-9]+' | head -1)
-            echo "is_tag=true"  >> $GITHUB_OUTPUT
-            echo "version=${TAG}" >> $GITHUB_OUTPUT
+            echo "is_tag=true"         >> $GITHUB_OUTPUT
+            echo "version=${TAG}"      >> $GITHUB_OUTPUT
           else
-            echo "is_tag=false" >> $GITHUB_OUTPUT
-            echo "version=${HEAD_BRANCH}-${SHORT_SHA}" >> $GITHUB_OUTPUT
+            echo "is_tag=false"                               >> $GITHUB_OUTPUT
+            echo "version=${HEAD_BRANCH}-${SHORT_SHA}"       >> $GITHUB_OUTPUT
           fi
-          echo "head_sha=${HEAD_SHA}" >> $GITHUB_OUTPUT
-          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "head_sha=${HEAD_SHA}"     >> $GITHUB_OUTPUT
           echo "head_branch=${HEAD_BRANCH}" >> $GITHUB_OUTPUT
 
-      - name: Read agent build info
+      - name: Download agent artifact from this run
+        uses: actions/download-artifact@v4
+        with:
+          name: last-good-agent
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: agent-info
+
+      - name: Read agent info
         id: agent
         run: |
-          if [ ! -f deployment/last-good-agent.json ]; then
-            echo "::error::deployment/last-good-agent.json not found — agent did not record its build info"
-            exit 1
-          fi
-          echo "image=$(jq -r '.container_image' deployment/last-good-agent.json)" >> $GITHUB_OUTPUT
-          echo "digest=$(jq -r '.container_digest' deployment/last-good-agent.json)" >> $GITHUB_OUTPUT
-          echo "signed=$(jq -r '.signed' deployment/last-good-agent.json)" >> $GITHUB_OUTPUT
-          cat deployment/last-good-agent.json
+          cat agent-info/last-good-agent.json
+          echo "image=$(jq -r '.container_image' agent-info/last-good-agent.json)"  >> $GITHUB_OUTPUT
+          echo "digest=$(jq -r '.container_digest' agent-info/last-good-agent.json)" >> $GITHUB_OUTPUT
+          echo "signed=$(jq -r '.signed' agent-info/last-good-agent.json)"           >> $GITHUB_OUTPUT
 
       - name: Wait for eval workflow on same commit
         id: eval-wait
@@ -61,76 +61,82 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
-          TIMEOUT=1800  # 30 minutes
+          TIMEOUT=1800
           INTERVAL=30
           ELAPSED=0
-
-          echo "Waiting for eval workflow to complete on commit ${HEAD_SHA}..."
-
+          echo "Waiting for eval workflow on commit ${HEAD_SHA}..."
           while [ $ELAPSED -lt $TIMEOUT ]; do
             RUN=$(gh api \
               "repos/${{ github.repository }}/actions/workflows/build-eval-image.yml/runs?head_sha=${HEAD_SHA}&per_page=1" \
               --jq '.workflow_runs[0] | {id: .id, status: .status, conclusion: .conclusion}' 2>/dev/null || echo "null")
-
-            if [ "$RUN" = "null" ] || [ -z "$RUN" ]; then
-              echo "No eval run found for this commit yet, waiting..."
-            else
+            if [ "$RUN" != "null" ] && [ -n "$RUN" ]; then
               STATUS=$(echo "$RUN" | jq -r '.status')
               CONCLUSION=$(echo "$RUN" | jq -r '.conclusion')
               RUN_ID=$(echo "$RUN" | jq -r '.id')
               echo "Eval run ${RUN_ID}: status=${STATUS} conclusion=${CONCLUSION}"
-
               if [ "$STATUS" = "completed" ]; then
                 echo "conclusion=${CONCLUSION}" >> $GITHUB_OUTPUT
-                echo "run_id=${RUN_ID}" >> $GITHUB_OUTPUT
-                break
+                echo "run_id=${RUN_ID}"         >> $GITHUB_OUTPUT
+                exit 0
               fi
             fi
-
             sleep $INTERVAL
             ELAPSED=$((ELAPSED + INTERVAL))
           done
+          echo "::warning::Eval timed out — using last good eval artifact"
+          echo "conclusion=timed_out" >> $GITHUB_OUTPUT
+          echo "run_id="              >> $GITHUB_OUTPUT
 
-          if [ $ELAPSED -ge $TIMEOUT ]; then
-            echo "::warning::Eval workflow did not complete within ${TIMEOUT}s — using last good eval"
-            echo "conclusion=timed_out" >> $GITHUB_OUTPUT
+      - name: Find last good eval run id
+        id: eval-run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CONCLUSION="${{ steps.eval-wait.outputs.conclusion }}"
+          CURRENT_RUN_ID="${{ steps.eval-wait.outputs.run_id }}"
+
+          if [ "$CONCLUSION" = "success" ]; then
+            echo "run_id=${CURRENT_RUN_ID}" >> $GITHUB_OUTPUT
+            echo "is_current=true"          >> $GITHUB_OUTPUT
+          else
+            # Find last successful eval run that has the artifact
+            LAST_RUN_ID=$(gh api \
+              "repos/${{ github.repository }}/actions/workflows/build-eval-image.yml/runs?branch=${{ steps.ctx.outputs.head_branch }}&status=success&per_page=10" \
+              --jq "[.workflow_runs[] | select(.id != ${CURRENT_RUN_ID:-0})] | .[0].id")
+            echo "run_id=${LAST_RUN_ID}" >> $GITHUB_OUTPUT
+            echo "is_current=false"      >> $GITHUB_OUTPUT
           fi
 
-      - name: Read eval build info (last good)
+      - name: Download eval artifact
+        id: eval-download
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: last-good-eval
+          run-id: ${{ steps.eval-run.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: eval-info
+
+      - name: Read eval info
         id: eval
         run: |
-          EVAL_CONCLUSION="${{ steps.eval-wait.outputs.conclusion }}"
-          HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
-
-          echo "Eval conclusion: ${EVAL_CONCLUSION}"
-
-          # If eval succeeded on this commit, pull latest code to get fresh last-good-eval.json
-          if [ "$EVAL_CONCLUSION" = "success" ]; then
-            git fetch origin ${{ github.event.workflow_run.head_branch }}
-            git checkout origin/${{ github.event.workflow_run.head_branch }} -- eval-runner/deployment/last-good-eval.json 2>/dev/null || true
-          fi
-
-          if [ ! -f eval-runner/deployment/last-good-eval.json ]; then
-            echo "::warning::No eval build recorded yet — eval info will be empty"
-            echo "image="    >> $GITHUB_OUTPUT
-            echo "digest="   >> $GITHUB_OUTPUT
-            echo "sha="      >> $GITHUB_OUTPUT
+          if [ ! -f eval-info/last-good-eval.json ]; then
+            echo "::warning::No eval artifact found — eval info will be empty"
+            echo "image="          >> $GITHUB_OUTPUT
+            echo "digest="         >> $GITHUB_OUTPUT
+            echo "sha="            >> $GITHUB_OUTPUT
             echo "is_current=false" >> $GITHUB_OUTPUT
             exit 0
           fi
-
-          EVAL_SHA=$(jq -r '.git_sha' eval-runner/deployment/last-good-eval.json)
-          IS_CURRENT="false"
-          [ "$EVAL_SHA" = "$HEAD_SHA" ] && IS_CURRENT="true"
-
-          echo "image=$(jq -r '.container_image' eval-runner/deployment/last-good-eval.json)"  >> $GITHUB_OUTPUT
-          echo "digest=$(jq -r '.container_digest' eval-runner/deployment/last-good-eval.json)" >> $GITHUB_OUTPUT
-          echo "sha=${EVAL_SHA}" >> $GITHUB_OUTPUT
-          echo "is_current=${IS_CURRENT}" >> $GITHUB_OUTPUT
-          echo "Eval image: $(jq -r '.container_image' eval-runner/deployment/last-good-eval.json) (current=${IS_CURRENT})"
+          cat eval-info/last-good-eval.json
+          echo "image=$(jq -r '.container_image' eval-info/last-good-eval.json)"   >> $GITHUB_OUTPUT
+          echo "digest=$(jq -r '.container_digest' eval-info/last-good-eval.json)"  >> $GITHUB_OUTPUT
+          echo "sha=$(jq -r '.git_sha' eval-info/last-good-eval.json)"              >> $GITHUB_OUTPUT
+          echo "is_current=${{ steps.eval-run.outputs.is_current }}"                >> $GITHUB_OUTPUT
 
       - name: Create combined release-info.json
         run: |
+          mkdir -p deployment
           cat > deployment/release-info.json <<EOF
           {
             "version": "${{ steps.ctx.outputs.version }}",
@@ -157,13 +163,7 @@ jobs:
           cd deployment
           zip -r ../deployment.zip . -x "*.git*"
           cd ..
-
-      - name: Generate checksums
-        run: |
-          FILES="deployment.zip"
-          [ -f sbom.cdx.json ]         && FILES="$FILES sbom.cdx.json"
-          [ -f trivy-report.json ]     && FILES="$FILES trivy-report.json"
-          sha256sum $FILES > SHA256SUMS.txt
+          sha256sum deployment.zip > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: Upload combined package as artifact (branch builds)
@@ -201,13 +201,13 @@ jobs:
             ```
 
             **Digest:** `${{ steps.eval.outputs.digest }}`
-            ${{ steps.eval.outputs.is_current != 'true' && format('> Built from commit `{0}` — eval build failed or is still running on this release commit.', steps.eval.outputs.sha) || '> Built from this release commit.' }}
+            ${{ steps.eval.outputs.is_current != 'true' && format('> Built from commit `{0}` — eval build failed or timed out on this release commit.', steps.eval.outputs.sha) || '> Built from this release commit.' }}
 
             ## Artifacts
 
             | File | Description |
             |------|-------------|
-            | `deployment.zip` | Combined deployment manifests with agent + eval image references |
+            | `deployment.zip` | Deployment manifests with agent + eval image references |
             | `SHA256SUMS.txt` | SHA-256 checksums |
           draft: false
           prerelease: ${{ contains(steps.ctx.outputs.version, 'alpha') || contains(steps.ctx.outputs.version, 'beta') || contains(steps.ctx.outputs.version, 'rc') }}

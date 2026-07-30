@@ -214,9 +214,7 @@ jobs:
       - name: Record last-good-agent build
         if: github.event_name != 'pull_request'
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          cat > deployment/last-good-agent.json <<EOF
+          cat > /tmp/last-good-agent.json <<EOF
           {
             "container_image": "ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}",
             "container_digest": "${{ steps.push.outputs.digest }}",
@@ -227,9 +225,15 @@ jobs:
             "build_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           }
           EOF
-          git add deployment/last-good-agent.json
-          git diff --cached --quiet || git commit -m "chore(ci): update last-good-agent build [skip ci]"
-          git push origin HEAD:${{ github.ref_name }}
+          cat /tmp/last-good-agent.json
+
+      - name: Upload last-good-agent artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: last-good-agent
+          path: /tmp/last-good-agent.json
+          retention-days: 90
 
       - name: Create deployment package metadata
         if: github.event_name != 'pull_request'

@@ -148,12 +148,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
 
       - name: Record last-good-eval build
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          cat > eval-runner/deployment/last-good-eval.json <<EOF
+          cat > /tmp/last-good-eval.json <<EOF
           {
             "container_image": "ghcr.io/${{ github.repository }}-eval:${{ steps.version.outputs.version }}",
             "container_digest": "${{ steps.push.outputs.digest }}",
@@ -162,9 +158,14 @@ jobs:
             "build_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           }
           EOF
-          git add eval-runner/deployment/last-good-eval.json
-          git diff --cached --quiet || git commit -m "chore(ci): update last-good-eval build [skip ci]"
-          git push origin HEAD:${{ github.ref_name }}
+          cat /tmp/last-good-eval.json
+
+      - name: Upload last-good-eval artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: last-good-eval
+          path: /tmp/last-good-eval.json
+          retention-days: 90
 
       - name: Create deployment package metadata
         run: |
