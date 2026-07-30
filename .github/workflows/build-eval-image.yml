@@ -70,7 +70,7 @@ jobs:
           platforms: linux/amd64
 
       - name: Scan image for vulnerabilities
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: scan-target-eval:${{ steps.version.outputs.version }}
           format: table
@@ -79,9 +79,40 @@ jobs:
           trivyignores: .trivyignore
           exit-code: '1'
 
-      - name: Generate SARIF report
-        uses: aquasecurity/trivy-action@v0.36.0
+      - name: Generate Trivy JSON report
         if: always()
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: scan-target-eval:${{ steps.version.outputs.version }}
+          format: json
+          output: trivy-report-eval.json
+          scanners: vuln
+          exit-code: '0'
+
+      - name: Generate SBOM
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: scan-target-eval:${{ steps.version.outputs.version }}
+          format: cyclonedx
+          output: sbom-eval.cdx.json
+          scanners: vuln
+          exit-code: '0'
+
+      - name: Upload SBOM
+        if: always() && hashFiles('sbom-eval.cdx.json') != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sbom-eval-${{ steps.version.outputs.version }}
+          path: sbom-eval.cdx.json
+          retention-days: 90
+
+      - name: Generate SARIF report
+        if: always()
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: scan-target-eval:${{ steps.version.outputs.version }}
           format: sarif
@@ -97,7 +128,7 @@ jobs:
 
       - name: Upload Trivy report as artifact
         if: always() && hashFiles('trivy-results-eval.sarif') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: trivy-report-eval-${{ steps.version.outputs.version }}
           path: trivy-results-eval.sarif
