@@ -26,6 +26,11 @@ spec:
               name: http
               protocol: TCP
           env:
+            - name: AGENT_CONFIG_DIR
+              valueFrom:
+                configMapKeyRef:
+                  name: eval-runner-config
+                  key: AGENT_CONFIG_DIR
             - name: AGENT_HOST
               value: "http://agent:5002"
             - name: AI_PLATFORM_AGENT_ORG
@@ -88,6 +93,11 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 3
+          volumeMounts:
+            - name: agent-config
+              mountPath: /agent-config
+              readOnly: true
+
           resources:
             requests:
               memory: "256Mi"
@@ -95,3 +105,9 @@ spec:
             limits:
               memory: "1Gi"
               cpu: "1000m"
+
+      volumes:
+        - name: agent-config
+          persistentVolumeClaim:
+            claimName: agent-source-data
+            readOnly: true

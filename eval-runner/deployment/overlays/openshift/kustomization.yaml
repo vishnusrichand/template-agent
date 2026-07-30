@@ -7,6 +7,8 @@ kind: Kustomization
 #
 # Prerequisites:
 #   - agent-config ConfigMap and agent-secrets Secret must exist (from agent overlay)
+#   - agent-source-data PVC must exist (created by agent-engine; RWX in prod/preprod)
+#   - agent ServiceAccount must exist (created by OpenShift tenant provisioning)
 #   - KEDA HTTP Add-on operator installed (for HTTPScaledObject scale-to-zero)
 
 resources:

@@ -8,7 +8,7 @@ metadata:
 spec:
   # KEDA HTTPScaledObject manages replica count (min=0, max=2).
   # This value is the initial count before KEDA takes over.
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app: eval-runner
@@ -19,6 +19,7 @@ spec:
         app: eval-runner
         component: eval-runner
     spec:
+      serviceAccountName: agent
       terminationGracePeriodSeconds: 60
       containers:
         - name: eval-runner
@@ -29,6 +30,14 @@ spec:
               name: http
               protocol: TCP
           env:
+            # Agent config directory — PVC is mounted here; eval_api.py derives
+            # eval_cases.yaml and system.yaml paths from this value.
+            - name: AGENT_CONFIG_DIR
+              valueFrom:
+                configMapKeyRef:
+                  name: eval-runner-config
+                  key: AGENT_CONFIG_DIR
+
             # Agent endpoint — internal cluster DNS (same service name as agent Service)
             - name: AGENT_HOST
               value: "http://agent:5002"
@@ -126,6 +135,11 @@ spec:
             timeoutSeconds: 3
             failureThreshold: 3
 
+          volumeMounts:
+            - name: agent-config
+              mountPath: /agent-config
+              readOnly: true
+
           resources:
             requests:
               memory: "512Mi"
@@ -133,3 +147,9 @@ spec:
             limits:
               memory: "2Gi"
               cpu: "2000m"
+
+      volumes:
+        - name: agent-config
+          persistentVolumeClaim:
+            claimName: agent-source-data
+            readOnly: true

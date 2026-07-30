@@ -5,6 +5,7 @@ kind: Kustomization
 resources:
   - service.yaml
   - networkpolicy.yaml
+  - configmap.yaml
 
 labels:
   - pairs:
