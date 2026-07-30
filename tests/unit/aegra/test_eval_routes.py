@@ -256,22 +256,24 @@ class TestGetConfigHash:
         assert len(result) == 16
 
 
-# ── _require_eval_cases ───────────────────────────────────────────────────────
+# ── _require_eval_files ───────────────────────────────────────────────────────
 
 class TestRequireEvalCases:
     def test_raises_when_missing(self, tmp_path):
         from fastapi import HTTPException
         with patch.dict("os.environ", {"CONFIG_PATH": str(tmp_path)}):
             with pytest.raises(HTTPException) as exc_info:
-                er._require_eval_cases()
+                er._require_eval_files()
         assert exc_info.value.status_code == 400
 
     def test_passes_when_present(self, tmp_path):
         evals_dir = tmp_path / "evals" / "lightspeed-agent"
         evals_dir.mkdir(parents=True)
         (evals_dir / "eval_cases.yaml").write_text("cases: []")
+        (evals_dir / "system.yaml").write_text("llm: {}")
+        (evals_dir / "system.yaml").write_text("llm: {}")
         with patch.dict("os.environ", {"CONFIG_PATH": str(tmp_path)}):
-            er._require_eval_cases()  # should not raise
+            er._require_eval_files()  # should not raise
 
 
 # ── _ensure_evals_table ───────────────────────────────────────────────────────
@@ -599,6 +601,7 @@ class TestTriggerEval:
         evals_dir = tmp_path / "evals" / "lightspeed-agent"
         evals_dir.mkdir(parents=True)
         (evals_dir / "eval_cases.yaml").write_text("cases: []")
+        (evals_dir / "system.yaml").write_text("llm: {}")
 
         er._table_ensured = True
         cols = [_col("eval_status"), _col("eval_score"), _col("id")]
@@ -620,6 +623,7 @@ class TestTriggerEval:
         evals_dir = tmp_path / "evals" / "lightspeed-agent"
         evals_dir.mkdir(parents=True)
         (evals_dir / "eval_cases.yaml").write_text("cases: []")
+        (evals_dir / "system.yaml").write_text("llm: {}")
 
         er._table_ensured = True
 
@@ -660,6 +664,7 @@ class TestTriggerEval:
         evals_dir = tmp_path / "evals" / "lightspeed-agent"
         evals_dir.mkdir(parents=True)
         (evals_dir / "eval_cases.yaml").write_text("cases: []")
+        (evals_dir / "system.yaml").write_text("llm: {}")
 
         er._table_ensured = True
 
@@ -703,6 +708,7 @@ class TestForceTriggerEval:
         evals_dir = tmp_path / "evals" / "lightspeed-agent"
         evals_dir.mkdir(parents=True)
         (evals_dir / "eval_cases.yaml").write_text("cases: []")
+        (evals_dir / "system.yaml").write_text("llm: {}")
 
         er._table_ensured = True
 
