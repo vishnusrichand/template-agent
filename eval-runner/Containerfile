@@ -1,4 +1,4 @@
-ARG PYTHON_TAG=3.12-builder
+ARG PYTHON_TAG=3.13-builder
 FROM registry.access.redhat.com/hi/python:${PYTHON_TAG}
 
 WORKDIR /app
@@ -12,9 +12,7 @@ RUN pip install --no-cache-dir \
     "uvicorn[standard]" \
     httpx \
     pyyaml \
-    psycopg2-binary \
-    "msgpack>=1.2.1" \
-    "setuptools>=78.1.1"
+    psycopg2-binary
 
 USER 65532
 

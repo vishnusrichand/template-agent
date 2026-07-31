@@ -100,16 +100,35 @@ jobs:
           CURRENT_RUN_ID="${{ steps.eval-wait.outputs.run_id }}"
 
           if [ "$CONCLUSION" = "success" ]; then
-            echo "run_id=${CURRENT_RUN_ID}" >> $GITHUB_OUTPUT
-            echo "is_current=true"          >> $GITHUB_OUTPUT
-          else
-            # Find last successful eval run that has the artifact
-            LAST_RUN_ID=$(gh api \
-              "repos/${{ github.repository }}/actions/workflows/build-eval-image.yml/runs?branch=${{ steps.ctx.outputs.head_branch }}&status=success&per_page=10" \
-              --jq "[.workflow_runs[] | select(.id != ${CURRENT_RUN_ID:-0})] | .[0].id")
-            echo "run_id=${LAST_RUN_ID}" >> $GITHUB_OUTPUT
-            echo "is_current=false"      >> $GITHUB_OUTPUT
+            # Verify current run actually has the artifact before trusting it
+            HAS_ARTIFACT=$(gh api \
+              "repos/${{ github.repository }}/actions/runs/${CURRENT_RUN_ID}/artifacts" \
+              --jq '[.artifacts[] | select(.name == "last-good-eval")] | length')
+            if [ "${HAS_ARTIFACT:-0}" -gt 0 ]; then
+              echo "run_id=${CURRENT_RUN_ID}" >> $GITHUB_OUTPUT
+              echo "is_current=true"          >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            echo "::warning::Eval succeeded but artifact missing — falling back to last good"
           fi
+
+          # Search across all branches and tags for the most recent successful eval run
+          # that actually has the last-good-eval artifact uploaded
+          FOUND_RUN_ID=""
+          RUN_IDS=$(gh api \
+            "repos/${{ github.repository }}/actions/workflows/build-eval-image.yml/runs?status=success&per_page=20" \
+            --jq "[.workflow_runs[] | select(.id != ${CURRENT_RUN_ID:-0})] | .[].id")
+          for RID in $RUN_IDS; do
+            HAS=$(gh api "repos/${{ github.repository }}/actions/runs/${RID}/artifacts" \
+              --jq '[.artifacts[] | select(.name == "last-good-eval")] | length')
+            if [ "${HAS:-0}" -gt 0 ]; then
+              FOUND_RUN_ID="$RID"
+              echo "Found last good eval run with artifact: ${RID}"
+              break
+            fi
+          done
+          echo "run_id=${FOUND_RUN_ID}" >> $GITHUB_OUTPUT
+          echo "is_current=false"       >> $GITHUB_OUTPUT
 
       - name: Download eval artifact
         id: eval-download
