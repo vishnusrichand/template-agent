@@ -183,21 +183,25 @@ jobs:
           path: eval-artifacts
 
       - name: Create deployment packages
+        id: packages
         run: |
           cd deployment
           zip -r ../deployment.zip . -x "*.git*"
           cd ..
 
-          FILES="deployment.zip"
-
-          # Include eval deployment package if it was downloaded
+          HAS_EVAL_ZIP="false"
           if [ -f eval-artifacts/eval-runner-deployment.zip ]; then
             cp eval-artifacts/eval-runner-deployment.zip .
-            FILES="$FILES eval-runner-deployment.zip"
+            HAS_EVAL_ZIP="true"
           fi
 
-          sha256sum $FILES > SHA256SUMS.txt
+          if [ "$HAS_EVAL_ZIP" = "true" ]; then
+            sha256sum deployment.zip eval-runner-deployment.zip > SHA256SUMS.txt
+          else
+            sha256sum deployment.zip > SHA256SUMS.txt
+          fi
           cat SHA256SUMS.txt
+          echo "has_eval_zip=${HAS_EVAL_ZIP}" >> $GITHUB_OUTPUT
 
       - name: Upload combined package as artifact (branch builds)
         if: steps.ctx.outputs.is_tag == 'false'
@@ -210,8 +214,41 @@ jobs:
             SHA256SUMS.txt
           retention-days: 30
 
-      - name: Create GitHub Release (tags only)
-        if: steps.ctx.outputs.is_tag == 'true'
+      - name: Create GitHub Release without eval zip (tags only)
+        if: steps.ctx.outputs.is_tag == 'true' && steps.packages.outputs.has_eval_zip == 'false'
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+        with:
+          tag_name: ${{ steps.ctx.outputs.version }}
+          files: |
+            deployment.zip
+            SHA256SUMS.txt
+          body: |
+            ## Agent Image
+
+            ```bash
+            docker pull ${{ steps.agent.outputs.image }}
+            ```
+
+            **Digest:** `${{ steps.agent.outputs.digest }}`
+            **Signed:** ${{ steps.agent.outputs.signed == 'true' && 'Yes' || 'No' }}
+
+            ## Eval Runner Image ⚠️ no eval build available
+
+            No successful eval build found for this release.
+
+            ## Artifacts
+
+            | File | Description |
+            |------|-------------|
+            | `deployment.zip` | Agent deployment manifests + release-info.json |
+            | `SHA256SUMS.txt` | SHA-256 checksums |
+          draft: false
+          prerelease: ${{ contains(steps.ctx.outputs.version, 'alpha') || contains(steps.ctx.outputs.version, 'beta') || contains(steps.ctx.outputs.version, 'rc') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create GitHub Release with eval zip (tags only)
+        if: steps.ctx.outputs.is_tag == 'true' && steps.packages.outputs.has_eval_zip == 'true'
         uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
         with:
           tag_name: ${{ steps.ctx.outputs.version }}
