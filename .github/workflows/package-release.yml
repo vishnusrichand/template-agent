@@ -31,17 +31,22 @@ jobs:
           HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
           HEAD_BRANCH="${{ github.event.workflow_run.head_branch }}"
           SHORT_SHA="${HEAD_SHA::7}"
-          TAG=$(git tag --points-at "$HEAD_SHA" | grep -E '^v?[0-9]+\.[0-9]+' | head -1)
-          if [ -n "$TAG" ]; then
-            echo "is_tag=true"            >> $GITHUB_OUTPUT
-            echo "version=${TAG}"         >> $GITHUB_OUTPUT
+
+          # Use head_branch as primary discriminator.
+          # For a tag push, GitHub sets head_branch to the tag name (e.g. v1.7.7).
+          # For a branch push, it's the branch name (e.g. deep-agent).
+          # Only fall through to git tag detection when head_branch looks like a semver tag.
+          if echo "$HEAD_BRANCH" | grep -qE '^v?[0-9]+\.[0-9]+'; then
+            TAG="$HEAD_BRANCH"
+            echo "is_tag=true"        >> $GITHUB_OUTPUT
+            echo "version=${TAG}"     >> $GITHUB_OUTPUT
           else
             echo "is_tag=false"                         >> $GITHUB_OUTPUT
             echo "version=${HEAD_BRANCH}-${SHORT_SHA}"  >> $GITHUB_OUTPUT
           fi
           echo "head_sha=${HEAD_SHA}"       >> $GITHUB_OUTPUT
           echo "head_branch=${HEAD_BRANCH}" >> $GITHUB_OUTPUT
-          echo "Detected: is_tag=${TAG:+true}, version=${TAG:-${HEAD_BRANCH}-${SHORT_SHA}}"
+          echo "Detected: head_branch=${HEAD_BRANCH}, is_tag=$(echo $HEAD_BRANCH | grep -qE '^v?[0-9]+\.[0-9]+' && echo true || echo false)"
 
       - name: Download agent artifact from this run
         uses: actions/download-artifact@v4
@@ -208,19 +213,26 @@ jobs:
           zip -r ../deployment.zip . -x "*.git*"
           cd ..
 
-          HAS_EVAL_ZIP="false"
-          if [ -f eval-artifacts/eval-runner-deployment.zip ]; then
+          HAS_EVAL="false"
+          EVAL_IMAGE=""
+          EVAL_DIGEST=""
+
+          if [ -f eval-artifacts/eval-runner-deployment.zip ] && [ -f eval-info/last-good-eval.json ]; then
             cp eval-artifacts/eval-runner-deployment.zip .
-            HAS_EVAL_ZIP="true"
+            EVAL_IMAGE=$(jq -r '.container_image' eval-info/last-good-eval.json)
+            EVAL_DIGEST=$(jq -r '.container_digest' eval-info/last-good-eval.json)
+            HAS_EVAL="true"
           fi
 
-          if [ "$HAS_EVAL_ZIP" = "true" ]; then
+          if [ "$HAS_EVAL" = "true" ]; then
             sha256sum deployment.zip eval-runner-deployment.zip > SHA256SUMS.txt
           else
             sha256sum deployment.zip > SHA256SUMS.txt
           fi
           cat SHA256SUMS.txt
-          echo "has_eval_zip=${HAS_EVAL_ZIP}" >> $GITHUB_OUTPUT
+          echo "has_eval=${HAS_EVAL}"         >> $GITHUB_OUTPUT
+          echo "eval_image=${EVAL_IMAGE}"     >> $GITHUB_OUTPUT
+          echo "eval_digest=${EVAL_DIGEST}"   >> $GITHUB_OUTPUT
 
       - name: Upload combined package as artifact (branch builds)
         if: steps.ctx.outputs.is_tag == 'false'
@@ -234,7 +246,7 @@ jobs:
           retention-days: 30
 
       - name: Create GitHub Release without eval zip (tags only)
-        if: steps.ctx.outputs.is_tag == 'true' && steps.packages.outputs.has_eval_zip == 'false'
+        if: steps.ctx.outputs.is_tag == 'true' && steps.packages.outputs.has_eval == 'false'
         uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
         with:
           tag_name: ${{ steps.ctx.outputs.version }}
@@ -267,7 +279,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create GitHub Release with eval zip (tags only)
-        if: steps.ctx.outputs.is_tag == 'true' && steps.packages.outputs.has_eval_zip == 'true'
+        if: steps.ctx.outputs.is_tag == 'true' && steps.packages.outputs.has_eval == 'true'
         uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
         with:
           tag_name: ${{ steps.ctx.outputs.version }}
@@ -288,10 +300,10 @@ jobs:
             ## Eval Runner Image${{ steps.eval.outputs.is_current != 'true' && ' ⚠️ previous successful build' || '' }}
 
             ```bash
-            docker pull ${{ steps.eval.outputs.image }}
+            docker pull ${{ steps.packages.outputs.eval_image }}
             ```
 
-            **Digest:** `${{ steps.eval.outputs.digest }}`
+            **Digest:** `${{ steps.packages.outputs.eval_digest }}`
             ${{ steps.eval.outputs.is_current != 'true' && format('> Built from commit `{0}` — eval build failed or timed out on this release commit.', steps.eval.outputs.sha) || '> Built from this release commit.' }}
 
             ## Artifacts
