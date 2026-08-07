@@ -259,21 +259,22 @@ class TestGetConfigHash:
 # ── _require_eval_files ───────────────────────────────────────────────────────
 
 class TestRequireEvalCases:
-    def test_raises_when_missing(self, tmp_path):
+    async def test_raises_when_missing(self, tmp_path):
         from fastapi import HTTPException
-        with patch.dict("os.environ", {"CONFIG_PATH": str(tmp_path)}):
-            with pytest.raises(HTTPException) as exc_info:
-                er._require_eval_files()
+        with patch("deep_agent.aegra.eval_routes._has_postgres_dataset", AsyncMock(return_value=False)):
+            with patch.dict("os.environ", {"CONFIG_PATH": str(tmp_path)}):
+                with pytest.raises(HTTPException) as exc_info:
+                    await er._require_eval_files()
         assert exc_info.value.status_code == 400
 
-    def test_passes_when_present(self, tmp_path):
+    async def test_passes_when_present(self, tmp_path):
         evals_dir = tmp_path / "evals" / "lightspeed-agent"
         evals_dir.mkdir(parents=True)
         (evals_dir / "eval_cases.yaml").write_text("cases: []")
         (evals_dir / "system.yaml").write_text("llm: {}")
-        (evals_dir / "system.yaml").write_text("llm: {}")
-        with patch.dict("os.environ", {"CONFIG_PATH": str(tmp_path)}):
-            er._require_eval_files()  # should not raise
+        with patch("deep_agent.aegra.eval_routes._has_postgres_dataset", AsyncMock(return_value=False)):
+            with patch.dict("os.environ", {"CONFIG_PATH": str(tmp_path)}):
+                await er._require_eval_files()  # should not raise
 
 
 # ── _ensure_evals_table ───────────────────────────────────────────────────────
@@ -650,11 +651,12 @@ class TestTriggerEval:
         mock_request = MagicMock()
         mock_request.headers = {"authorization": "Bearer tok"}
 
-        with patch.dict("os.environ", {"CONFIG_PATH": str(tmp_path), "AGENT_CONFIG_HASH": "deadbeef"}):
-            with patch("deep_agent.aegra.eval_routes._pg_conn", AsyncMock(return_value=conn)):
-                with patch("deep_agent.aegra.eval_routes._fire_eval_run", new_callable=AsyncMock):
-                    with patch("deep_agent.aegra.eval_routes.asyncio.create_task"):
-                        result = await er.trigger_eval(mock_request)
+        with patch("deep_agent.aegra.eval_routes._require_eval_files", new_callable=AsyncMock):
+            with patch.dict("os.environ", {"CONFIG_PATH": str(tmp_path), "AGENT_CONFIG_HASH": "deadbeef"}):
+                with patch("deep_agent.aegra.eval_routes._pg_conn", AsyncMock(return_value=conn)):
+                    with patch("deep_agent.aegra.eval_routes._fire_eval_run", new_callable=AsyncMock):
+                        with patch("deep_agent.aegra.eval_routes.asyncio.create_task"):
+                            result = await er.trigger_eval(mock_request)
 
         assert result["eval_status"] == "in_progress"
         assert result["queued"] is True
@@ -726,10 +728,11 @@ class TestForceTriggerEval:
         mock_request = MagicMock()
         mock_request.headers = {}
 
-        with patch.dict("os.environ", {"CONFIG_PATH": str(tmp_path), "AGENT_CONFIG_HASH": "deadbeef"}):
-            with patch("deep_agent.aegra.eval_routes._pg_conn", AsyncMock(return_value=conn)):
-                with patch("deep_agent.aegra.eval_routes.asyncio.create_task"):
-                    result = await er.force_trigger_eval(mock_request)
+        with patch("deep_agent.aegra.eval_routes._require_eval_files", new_callable=AsyncMock):
+            with patch.dict("os.environ", {"CONFIG_PATH": str(tmp_path), "AGENT_CONFIG_HASH": "deadbeef"}):
+                with patch("deep_agent.aegra.eval_routes._pg_conn", AsyncMock(return_value=conn)):
+                    with patch("deep_agent.aegra.eval_routes.asyncio.create_task"):
+                        result = await er.force_trigger_eval(mock_request)
 
         assert result["eval_status"] == "in_progress"
         assert result["forced"] is True
