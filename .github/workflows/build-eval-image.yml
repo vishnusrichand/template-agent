@@ -184,7 +184,8 @@ jobs:
             "container_digest": "${{ steps.push.outputs.digest }}",
             "git_sha": "${{ github.sha }}",
             "git_ref": "${{ github.ref }}",
-            "build_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            "build_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "signed": ${{ steps.sign.outputs.signed == 'true' }}
           }
           EOF
           cat /tmp/last-good-eval.json
