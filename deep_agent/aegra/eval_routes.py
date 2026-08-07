@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import uuid
@@ -30,6 +31,10 @@ _AGENT_NAME = os.environ.get("AI_PLATFORM_AGENT_NAME", "agent")
 _EVAL_RUNNER_URL = os.environ.get("EVAL_RUNNER_URL", "")
 
 
+# SYNC: this algorithm must stay identical to _compute_config_hash() in
+# eval-runner/src/eval_postgres.py — both services hash the same config dir
+# and share the result via the `evals` Postgres table. Any change here must
+# be mirrored there (same extensions, same exclude dirs, same truncation).
 _HASH_EXTENSIONS = {".md", ".yaml", ".json"}
 _HASH_EXCLUDE_DIRS = {"evals", "deployment"}
 
@@ -157,8 +162,6 @@ async def _run_and_get_state(
 
 def _extract_tool_calls_from_messages(messages: list[Any]) -> list[dict[str, Any]]:
     """Extract non-internal tool calls from a list of LangChain messages."""
-    import json as _json
-
     tool_calls: list[dict[str, Any]] = []
     for msg in messages:
         msg_dict = (
@@ -189,7 +192,7 @@ def _extract_tool_calls_from_messages(messages: list[Any]) -> list[dict[str, Any
                     args_raw = fc.get("arguments", "{}")
                     try:
                         args = (
-                            _json.loads(args_raw)
+                            json.loads(args_raw)
                             if isinstance(args_raw, str)
                             else args_raw
                         )
@@ -484,6 +487,39 @@ async def _ensure_evals_table_once() -> None:
     _table_ensured = True
 
 
+async def _run_ddl_once(
+    ddl: str,
+    migrations: list[str],
+    flag_attr: str,
+    label: str,
+) -> None:
+    """Generic once-only DDL runner. Updates the module-level bool named flag_attr.
+
+    The flag is only set on SUCCESS so that transient failures can be retried.
+    set_autocommit is inside the try/finally so the connection is always closed.
+    """
+    import sys as _sys
+
+    mod = _sys.modules[__name__]
+    if getattr(mod, flag_attr):
+        return
+    conn = await _pg_conn()
+    try:
+        await conn.set_autocommit(True)
+        await conn.execute(ddl)
+        for stmt in migrations:
+            try:
+                await conn.execute(stmt)
+            except Exception as exc:
+                log.warning("%s migration skipped (may already exist): %s", label, exc)
+        setattr(mod, flag_attr, True)  # only on success
+    except Exception as exc:
+        log.warning("%s DDL failed: %s", label, exc)
+        raise  # propagate so callers know the table is not ready
+    finally:
+        await conn.close()
+
+
 def _pg_row_to_dict(row: Any, cursor: Any) -> dict[str, Any]:
     return dict(zip([d.name for d in cursor.description], row))
 
@@ -535,10 +571,44 @@ def _get_config_hash() -> str:
     return _compute_config_hash()
 
 
-async def _fire_eval_run(config_hash: str, auth_token: str = "") -> None:
-    """Fire-and-forget call to eval runner. Errors are logged, never raised."""
+async def _mark_eval_error(config_hash: str, reason: str, created_at: datetime) -> None:
+    """Set the specific in_progress eval record to error.
+
+    Uses created_at to target the exact row so a later trigger's fresh
+    in_progress record is never accidentally marked as error.
+    """
+    try:
+        async with await _pg_conn() as conn:
+            await conn.execute(
+                "UPDATE evals SET eval_status='error', completed_at=NOW(), updated_at=NOW(), "
+                "results_detail=%s::jsonb "
+                "WHERE org=%s AND name=%s AND config_hash=%s "
+                "AND eval_status='in_progress' AND created_at=%s",
+                (
+                    json.dumps({"error": reason}),
+                    _AGENT_ORG,
+                    _AGENT_NAME,
+                    config_hash,
+                    created_at,
+                ),
+            )
+    except Exception as pg_exc:
+        log.warning("Could not mark eval as error: %s", pg_exc)
+
+
+async def _fire_eval_run(
+    config_hash: str, auth_token: str = "", created_at: datetime | None = None
+) -> None:
+    """Call the eval runner pod.
+
+    On failure, marks the eval record as error in Postgres
+    so the UI status poll surfaces the failure instead of spinning indefinitely.
+    """
+    row_created_at = created_at or datetime.now(UTC)
     if not _EVAL_RUNNER_URL:
-        log.warning("EVAL_RUNNER_URL not set — eval pod not started")
+        msg = "EVAL_RUNNER_URL not set — eval runner not started"
+        log.warning(msg)
+        await _mark_eval_error(config_hash, msg, row_created_at)
         return
     try:
         headers: dict[str, str] = {"Content-Type": "application/json"}
@@ -558,34 +628,103 @@ async def _fire_eval_run(config_hash: str, auth_token: str = "") -> None:
                 },
                 headers=headers,
             )
-            log.info("eval_runner_called status=%s", resp.status_code)
+            if resp.status_code >= 400:
+                msg = f"Eval runner returned {resp.status_code}: {resp.text[:200]}"
+                log.warning(msg)
+                await _mark_eval_error(config_hash, msg, row_created_at)
+            else:
+                log.info("eval_runner_called status=%s", resp.status_code)
     except Exception as exc:
-        log.warning("eval_runner_call_failed: %s", exc)
+        msg = f"Could not reach eval runner at {_EVAL_RUNNER_URL}: {exc}"
+        log.warning(msg)
+        await _mark_eval_error(config_hash, msg, row_created_at)
 
 
-def _require_eval_files() -> None:
-    """Raise HTTPException(400) if eval_cases.yaml or system.yaml is missing."""
+_DATASETS_DDL = """
+    CREATE TABLE IF NOT EXISTS eval_datasets (
+        id          SERIAL PRIMARY KEY,
+        org         TEXT NOT NULL,
+        name        TEXT NOT NULL,
+        dataset     JSONB NOT NULL,
+        judge_model TEXT,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CONSTRAINT eval_datasets_org_name_uq UNIQUE (org, name)
+    )
+"""
+# Migration for tables created before judge_model was added
+_DATASETS_DDL_MIGRATIONS = [
+    "ALTER TABLE eval_datasets ADD COLUMN IF NOT EXISTS judge_model TEXT",
+]
+
+_datasets_table_ensured = False
+
+
+async def _ensure_datasets_table_once() -> None:
+    await _run_ddl_once(
+        _DATASETS_DDL,
+        _DATASETS_DDL_MIGRATIONS,
+        "_datasets_table_ensured",
+        "eval_datasets",
+    )
+
+
+async def _has_postgres_dataset() -> bool:
+    """Return True if eval_datasets has a row for this org+name."""
+    try:
+        await _ensure_datasets_table_once()
+        async with await _pg_conn() as conn:
+            row = await conn.execute(
+                "SELECT 1 FROM eval_datasets WHERE org=%s AND name=%s LIMIT 1",
+                (_AGENT_ORG, _AGENT_NAME),
+            )
+            return await row.fetchone() is not None
+    except Exception as exc:
+        log.warning("Could not check Postgres dataset: %s", exc)
+        return False
+
+
+async def _require_eval_files() -> None:
+    """Validate that eval can run, then let the eval runner handle all file I/O.
+
+    The agentpod no longer writes any files to the config volume.
+    The eval runner pulls the dataset from Postgres directly and writes to a
+    temporary file scoped to the eval run.
+
+    eval_cases: Postgres must have a dataset, OR dev-mode config file fallback.
+    system.yaml: eval runner handles generation/selection — agentpod does not touch it.
+    """
     from fastapi import HTTPException
 
-    config_dir = os.environ.get("CONFIG_PATH", "config/agent")
-    eval_cases = Path(f"{config_dir}/evals/lightspeed-agent/eval_cases.yaml")
-    system_yaml = Path(f"{config_dir}/evals/lightspeed-agent/system.yaml")
-    if not eval_cases.exists():
-        raise HTTPException(
-            status_code=400,
-            detail="No eval dataset found. Add eval cases before running evaluation.",
-        )
-    if not system_yaml.exists():
-        raise HTTPException(
-            status_code=400,
-            detail="Eval system config (system.yaml) not found. Ensure the agent config is mounted correctly.",
-        )
+    has_pg = await _has_postgres_dataset()
+    if not has_pg:
+        is_dev = os.environ.get("ENVIRONMENT", "development").lower() == "development"
+        config_dir = os.environ.get("CONFIG_PATH", "config/agent")
+        eval_cases = Path(f"{config_dir}/evals/lightspeed-agent/eval_cases.yaml")
+        if is_dev and eval_cases.exists():
+            log.info(
+                "Dev mode: no Postgres dataset — eval runner will use eval_cases.yaml from config. "
+                "Save cases via the Dataset UI to switch to Postgres-managed evals."
+            )
+        else:
+            config_hint = (
+                " A config file (eval_cases.yaml) exists but is ignored in production — "
+                "save your dataset via the Dataset UI."
+                if eval_cases.exists()
+                else ""
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No eval dataset saved. Add or import test cases via the Dataset UI "
+                    f"before running evaluation.{config_hint}"
+                ),
+            )
 
 
 @eval_mgmt_router.post("/trigger")
 async def trigger_eval(request: Request) -> dict[str, Any]:
     """Cache-first eval trigger. Returns cached result or sets in_progress."""
-    _require_eval_files()
+    await _require_eval_files()
 
     config_hash = _get_config_hash()
 
@@ -600,47 +739,76 @@ async def trigger_eval(request: Request) -> dict[str, Any]:
         existing = await row.fetchone()
         if existing:
             doc = _pg_row_to_dict(existing, row)
+            # Bypass the cache when the dataset source has changed since the last eval:
+            # 1. Dataset was updated after the cached eval completed (edit scenario).
+            # 2. Dataset was cleared from Postgres (the data source switched to config
+            #    file — the cached result is stale regardless of config_hash match).
+            try:
+                ds_row = await conn.execute(
+                    "SELECT created_at FROM eval_datasets WHERE org=%s AND name=%s",
+                    (_AGENT_ORG, _AGENT_NAME),
+                )
+                ds = await ds_row.fetchone()
+                if ds is None:
+                    # Postgres dataset cleared — always run fresh so config file is used
+                    log.info(
+                        "eval_datasets is empty — bypassing cache to pick up config file"
+                    )
+                    existing = None
+                elif ds[0] and doc.get("completed_at") and ds[0] > doc["completed_at"]:
+                    log.info(
+                        "Dataset updated after last eval (dataset=%s eval=%s) — bypassing cache",
+                        ds[0].isoformat(),
+                        doc["completed_at"],
+                    )
+                    existing = None
+            except Exception as exc:
+                log.warning("Could not check dataset recency for cache bypass: %s", exc)
+
+        if existing:
+            doc = _pg_row_to_dict(existing, row)
             doc.pop("id", None)
             return {"cached": True, **doc}
 
     record, is_new = await _atomic_set_in_progress(config_hash, force=False)
     if not is_new:
         return {"eval_status": "in_progress", "message": "evaluation already running"}
-
-    auth_token = request.headers.get("authorization", "")
-    asyncio.create_task(_fire_eval_run(config_hash, auth_token))
-
-    return {
-        "eval_status": "in_progress",
-        "queued": True,  # UI should call eval pod only when queued=True
-        "config_hash": config_hash,
-        "org": _AGENT_ORG,
-        "name": _AGENT_NAME,
-    }
+    return await _queue_eval_run(config_hash, request, record)
 
 
 @eval_mgmt_router.post("/force-trigger")
 async def force_trigger_eval(request: Request) -> dict[str, Any]:
     """Force a fresh eval run, bypassing cache."""
-    _require_eval_files()
+    await _require_eval_files()
 
     config_hash = _get_config_hash()
 
     record, is_new = await _atomic_set_in_progress(config_hash, force=True)
     if not is_new:
         return {"eval_status": "in_progress", "message": "evaluation already running"}
+    return await _queue_eval_run(config_hash, request, record, forced=True)
 
+
+async def _queue_eval_run(
+    config_hash: str,
+    request: Request,
+    record: dict | None,
+    *,
+    forced: bool = False,
+) -> dict[str, Any]:
     auth_token = request.headers.get("authorization", "")
-    asyncio.create_task(_fire_eval_run(config_hash, auth_token))
-
-    return {
+    row_ts = record.get("created_at") if record else None
+    asyncio.create_task(_fire_eval_run(config_hash, auth_token, row_ts))
+    result: dict[str, Any] = {
         "eval_status": "in_progress",
-        "queued": True,  # UI should call eval pod only when queued=True
+        "queued": True,
         "config_hash": config_hash,
         "org": _AGENT_ORG,
         "name": _AGENT_NAME,
-        "forced": True,
     }
+    if forced:
+        result["forced"] = True
+    return result
 
 
 _EVAL_STALE_TIMEOUT_MINUTES = int(os.environ.get("EVAL_STALE_TIMEOUT_MINUTES", "300"))
@@ -658,7 +826,7 @@ async def eval_status() -> dict[str, Any]:
         await conn.execute(
             "UPDATE evals SET eval_status='error', completed_at=NOW(), updated_at=NOW() "
             "WHERE org=%s AND name=%s AND eval_status='in_progress' "
-            "AND created_at < NOW() - INTERVAL '%s minutes'",
+            "AND created_at < NOW() - make_interval(mins => %s)",
             (_AGENT_ORG, _AGENT_NAME, _EVAL_STALE_TIMEOUT_MINUTES),
         )
         row = await conn.execute(
@@ -781,3 +949,127 @@ async def eval_trends(request: Request) -> dict[str, Any]:
                 )
 
     return {"metrics": metrics, "overall": overall}
+
+
+# ---------------------------------------------------------------------------
+# Dataset management — store / retrieve the test-case dataset in Postgres
+# ---------------------------------------------------------------------------
+
+
+def _collect_agent_models() -> list[dict[str, Any]]:
+    """Read model: from PROMPT.md + all subagent .md frontmatters.
+
+    Returns a list of unique model entries: [{model, source, default}].
+    """
+    import re
+
+    import yaml as _yaml  # noqa: PLC0415
+
+    config_dir = os.environ.get("CONFIG_PATH", "config/agent")
+    models: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def _parse_model(path: Path, source: str, default: bool = False) -> None:
+        if not path.exists():
+            return
+        try:
+            content = path.read_text(encoding="utf-8")
+            m = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
+            if not m:
+                return
+            fm = _yaml.safe_load(m.group(1)) or {}
+            model = str(fm.get("model", "")).strip()
+            if model and model not in seen:
+                models.append({"model": model, "source": source, "default": default})
+                seen.add(model)
+        except Exception as exc:
+            log.warning("Could not parse model from %s: %s", path, exc)
+
+    _parse_model(Path(f"{config_dir}/PROMPT.md"), "orchestrator", default=True)
+
+    subagents_dir = Path(f"{config_dir}/subagents")
+    if subagents_dir.exists():
+        for md_file in sorted(subagents_dir.glob("*.md")):
+            fm_source = f"subagent:{md_file.stem}"
+            _parse_model(md_file, fm_source)
+
+    return models
+
+
+@eval_mgmt_router.get("/models")
+async def get_eval_models() -> dict[str, Any]:
+    """Return available LLM models for evaluation (orchestrator + subagents)."""
+    return {"models": _collect_agent_models()}
+
+
+class DatasetUpsertRequest(BaseModel):
+    """Dataset payload sent from the UI."""
+
+    cases: list[dict[str, Any]]
+    judge_model: str | None = None
+
+
+@eval_mgmt_router.post("/dataset")
+async def upsert_dataset(body: DatasetUpsertRequest) -> dict[str, Any]:
+    """Upsert the eval dataset for this agent.
+
+    Only one row is kept per (org, name) — the latest submission replaces the
+    previous one via ON CONFLICT ... DO UPDATE.
+    """
+    await _ensure_datasets_table_once()
+    now = datetime.now(UTC)
+    dataset_json = json.dumps({"cases": body.cases})
+
+    async with await _pg_conn() as conn:
+        await conn.execute(
+            """
+            INSERT INTO eval_datasets (org, name, dataset, judge_model, created_at)
+            VALUES (%s, %s, %s::jsonb, %s, %s)
+            ON CONFLICT (org, name)
+            DO UPDATE SET dataset = EXCLUDED.dataset,
+                          judge_model = EXCLUDED.judge_model,
+                          created_at = EXCLUDED.created_at
+            """,
+            (_AGENT_ORG, _AGENT_NAME, dataset_json, body.judge_model, now),
+        )
+
+    log.info(
+        "Dataset upserted: org=%s name=%s cases=%d judge_model=%s",
+        _AGENT_ORG,
+        _AGENT_NAME,
+        len(body.cases),
+        body.judge_model,
+    )
+    return {"status": "ok", "case_count": len(body.cases)}
+
+
+@eval_mgmt_router.get("/dataset")
+async def get_dataset() -> dict[str, Any]:
+    """Return the stored eval dataset for this agent."""
+    from fastapi import HTTPException
+
+    await _ensure_datasets_table_once()
+
+    async with await _pg_conn() as conn:
+        row = await conn.execute(
+            "SELECT dataset, judge_model, created_at FROM eval_datasets WHERE org=%s AND name=%s",
+            (_AGENT_ORG, _AGENT_NAME),
+        )
+        result = await row.fetchone()
+
+    if not result:
+        raise HTTPException(status_code=404, detail="no dataset found")
+
+    dataset, judge_model, created_at = result
+    if isinstance(dataset, str):
+        dataset = json.loads(dataset)
+
+    return {
+        "dataset": dataset,
+        "judge_model": judge_model,
+        "created_at": (
+            created_at.isoformat()
+            if hasattr(created_at, "isoformat")
+            else str(created_at)
+        ),
+    }

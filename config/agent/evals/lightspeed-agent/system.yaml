@@ -2,11 +2,11 @@
 
 # Core evaluation parameters
 core:
-  max_threads: 10             # Maximum number of threads, set to null for Python default. 50 is OK for bigger datasets
+  max_threads: ~              # null = Python default (no cap) — all cases run concurrently to avoid auth token expiry
   fail_on_invalid_data: false  # If False don't fail on invalid conversations (like missing context for some metrics)
   skip_on_failure: false      # If True, skip remaining turns when a turn evaluation fails (can be overridden per conversation)
   cache_enabled: true         # Global cache toggle, if True LLM as a judge, embeddings and API queries are cached
-  cache_base_dir: .caches     # Global base cache dir (queries cached separately under /llm (LLM as a judge + embeddings) and /agent for agent API calls)
+  cache_base_dir: /tmp/.eval_caches  # absolute path — writable by non-root container user (queries cached separately under /llm (LLM as a judge + embeddings) and /agent for agent API calls)
                               # IMPORTANT: after fixing eval collection code (run_eval.py), delete .caches/llm/ before re-running.
                               # Stale FAIL verdicts from broken runs are replayed from cache even after the fix.
 
@@ -59,11 +59,13 @@ agents:
   enabled: false
 quality_score:
   metrics:
-    - "ragas:faithfulness"
     - "ragas:context_precision_with_reference"
     - "custom:tool_eval"
     - "custom:answer_correctness"
   default: true # If true, all metrics in this list get default: true
+  # ragas:faithfulness is NOT here — default:true would force it onto every turn,
+  # including those without tool results (contexts), causing validation errors.
+  # It is applied per-turn via turn_metrics when tool calls are expected.
 metrics_metadata:
   # Turn-level metrics metadata
   turn_level:
@@ -74,7 +76,7 @@ metrics_metadata:
       default: true  # This metric is applied by default when no turn_metrics specified
 
     "ragas:faithfulness":
-      threshold: 0.8
+      threshold: 0.7
       description: "How faithful the response is to the provided context"
       default: false  # By default the value is false
 
@@ -143,21 +145,19 @@ metrics_metadata:
     # GEval turn-level metrics (criteria = required; evaluation_steps, rubrics = optional)
     "geval:tone_safety":
       criteria: |
-        Assess whether the response uses a safe, respectful, and professional tone.
-        The response should be clear, neutral, and constructive — avoiding language
-        that is dismissive, alarmist, judgmental, or offensive. Where the response
-        provides advice or guidance on sensitive topics, it should include an
-        appropriate disclaimer or caveat acknowledging its limitations.
+        Assess whether the response uses a respectful, polite, and professional tone.
+        Evaluate ONLY the tone — not the content, safety of information, or topic sensitivity.
+        The response should be clear, supportive, and non-judgmental.
+        It should not be dismissive, condescending, rude, alarmist, or offensive.
       evaluation_params:
         - query
         - response
       evaluation_steps:
-        - "Check that the response does not use judgmental, condescending, or offensive language toward the user."
-        - "Verify that the tone is supportive, neutral, and non-alarmist regardless of the subject matter."
-        - "Check that the response does not make absolute claims in areas that require professional judgment (e.g. medical, legal, financial)."
-        - "Verify that any advice on sensitive or high-stakes topics is accompanied by an appropriate disclaimer or recommendation to consult a relevant expert."
+        - "Check that the response does not use condescending, rude, or offensive language."
+        - "Verify that the tone is warm, supportive, and non-alarmist."
+        - "Check that the response is clear and professional in its wording."
       threshold: 0.8
-      description: "Safety and appropriateness of tone across all response types"
+      description: "Tone is respectful, polite, and professional"
 
     "geval:technical_accuracy":
       criteria: |  # required

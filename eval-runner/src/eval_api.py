@@ -30,8 +30,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from eval_cases import load_cases
-from eval_postgres import _compute_config_hash
+from eval_cases import get_metric_thresholds, load_cases
+from eval_postgres import _compute_config_hash, fetch_dataset_cases, fetch_judge_model
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -120,17 +120,36 @@ _latest_result: dict[str, Any] | None = None
 def _find_eval_files(pattern: str | None) -> list[Path]:
     """Return one temp file per tag (parallel all) or one file for a specific pattern.
 
+    Data source resolution order:
+    1. Postgres eval_datasets table (always tried first — Postgres is source of truth)
+    2. eval_cases.yaml from config dir (dev-mode fallback when Postgres is empty)
+
     When pattern is None every tag gets its own temp file so _run_eval can run
     them concurrently via asyncio.gather while keeping conversations sequential
     within each tag subprocess.
     """
-    if not EVAL_CASES_PATH.exists():
-        raise FileNotFoundError(
-            "No eval dataset found. Add eval cases before running evaluation."
+    # Try Postgres first
+    cases = fetch_dataset_cases(AGENT_ORG, AGENT_NAME)
+    if cases:
+        log.info(
+            "Loaded %d eval cases from Postgres (org=%s name=%s)",
+            len(cases),
+            AGENT_ORG,
+            AGENT_NAME,
         )
-
-    cases = load_cases(EVAL_CASES_PATH)
-    log.info("Loaded %d eval cases from %s", len(cases), EVAL_CASES_PATH)
+    else:
+        # Dev-mode fallback: use config file if Postgres has no dataset
+        if not EVAL_CASES_PATH.exists():
+            raise FileNotFoundError(
+                "No eval dataset found. Add eval cases via the Dataset UI "
+                "or provide eval_cases.yaml in the agent config."
+            )
+        cases = load_cases(EVAL_CASES_PATH)
+        log.info(
+            "Postgres dataset empty — using config file fallback: %s (%d cases)",
+            EVAL_CASES_PATH,
+            len(cases),
+        )
 
     if pattern is None:
         # Group cases by tag in one pass, preserving insertion order
@@ -172,12 +191,180 @@ def _find_eval_files(pattern: str | None) -> list[Path]:
     return [Path(tmp.name)]
 
 
+def _build_turn_metrics_metadata() -> dict:
+    """Build metrics_metadata.turn_level from tag_metrics.yaml thresholds."""
+    thresholds = get_metric_thresholds()
+
+    def t(metric: str) -> dict:
+        v = thresholds.get(metric)
+        return {"threshold": v} if v is not None else {}
+
+    return {
+        "custom:answer_correctness": {
+            **t("custom:answer_correctness"),
+            "description": "Correctness vs expected answer",
+        },
+        "custom:tool_eval": {
+            "description": "Tool call evaluation",
+            "ordered": True,
+            "full_match": True,
+        },
+        "custom:intent_eval": {
+            **t("custom:intent_eval"),
+            "description": "Intent alignment evaluation",
+        },
+        "custom:keywords_eval": {"description": "Keywords matching evaluation"},
+        "geval:tone_safety": {
+            "criteria": (
+                "Assess whether the response uses a respectful, polite, and professional tone. "
+                "Evaluate ONLY the tone — not the content, safety of information, or topic sensitivity. "
+                "The response should be clear, supportive, and non-judgmental. "
+                "It should not be dismissive, condescending, rude, alarmist, or offensive."
+            ),
+            "evaluation_params": ["query", "response"],
+            "evaluation_steps": [
+                "Check that the response does not use condescending, rude, or offensive language.",
+                "Verify that the tone is warm, supportive, and non-alarmist.",
+                "Check that the response is clear and professional in its wording.",
+            ],
+            **t("geval:tone_safety"),
+            "description": "Tone is respectful, polite, and professional",
+        },
+        "ragas:faithfulness": {
+            **t("ragas:faithfulness"),
+            "description": "Response grounded in tool results / retrieved context",
+        },
+    }
+
+
+def _build_conversation_metrics_metadata() -> dict:
+    """Build metrics_metadata.conversation_level from tag_metrics.yaml thresholds."""
+    thresholds = get_metric_thresholds()
+    result = {}
+    conv_metrics = {
+        "deepeval:knowledge_retention": "Knowledge retention across turns",
+        "deepeval:conversation_completeness": "How completely the conversation addresses user intentions",
+    }
+    for metric, description in conv_metrics.items():
+        entry: dict = {"description": description}
+        v = thresholds.get(metric)
+        if v is not None:
+            entry["threshold"] = v
+        result[metric] = entry
+    return result
+
+
+def _default_system_yaml(judge_model: str, provider: str) -> dict:
+    """Return a minimal system.yaml config dict."""
+    return {
+        "core": {
+            "max_threads": None,
+            "fail_on_invalid_data": False,
+            "skip_on_failure": False,
+            "cache_enabled": True,
+            "cache_base_dir": "/tmp/.eval_caches",
+        },
+        "llm": {"provider": provider, "model": judge_model, "max_tokens": 4096},
+        "llm_pool": {
+            "defaults": {
+                "timeout": 300,
+                "num_retries": 3,
+                "parameters": {"temperature": 0.0, "max_completion_tokens": 4096},
+            },
+            "models": {"judge": {"provider": provider, "model": judge_model}},
+        },
+        "judge_panel": {"judges": ["judge"], "aggregation_strategy": "max"},
+        "agents": {"enabled": False},
+        "quality_score": {
+            "metrics": [
+                "custom:answer_correctness",
+                "custom:tool_eval",
+            ],
+            "default": True,
+            # ragas:faithfulness excluded — default:True would force it on every turn;
+            # it is added per-turn only when tool calls are expected.
+        },
+        "metrics_metadata": {
+            "turn_level": _build_turn_metrics_metadata(),
+            "conversation_level": _build_conversation_metrics_metadata(),
+        },
+        "storage": [
+            {
+                "type": "postgres",
+                "database": POSTGRES_DB,
+                "table_name": "evaluation_results",
+                "host": POSTGRES_HOST,
+                "port": POSTGRES_PORT,
+                "user": POSTGRES_USER,
+                "password": POSTGRES_PASSWORD,
+            }
+        ],
+        "environment": {
+            "DEEPEVAL_TELEMETRY_OPT_OUT": "YES",
+            "DEEPEVAL_DISABLE_PROGRESS_BAR": "YES",
+            "LITELLM_LOG": "ERROR",
+        },
+        "logging": {"source_level": "INFO", "package_level": "ERROR"},
+    }
+
+
+def _detect_provider(model: str) -> str:
+    m = model.lower()
+    if any(m.startswith(p) for p in ("gemini-", "google/")):
+        return "vertex"
+    if m.startswith("claude-"):
+        return "anthropic_vertex"
+    if any(m.startswith(p) for p in ("gpt-", "o1-", "o3-", "o4-")):
+        return "openai"
+    return "vertex"
+
+
+def _read_prompt_model() -> str:
+    """Read model: from PROMPT.md YAML frontmatter, defaulting to gemini-2.5-pro."""
+    import re
+
+    prompt_md = Path(_agent_config_dir) / "PROMPT.md"
+    if prompt_md.exists():
+        try:
+            content = prompt_md.read_text(encoding="utf-8")
+            m = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
+            if m:
+                fm = yaml.safe_load(m.group(1)) or {}
+                return str(fm.get("model", "gemini-2.5-pro"))
+        except Exception:
+            pass
+    return "gemini-2.5-pro"
+
+
+# Module-level Postgres config for _default_system_yaml
+from eval_postgres import (  # noqa: E402 — after constants are set
+    POSTGRES_DB,
+    POSTGRES_HOST,
+    POSTGRES_PASSWORD,
+    POSTGRES_PORT,
+    POSTGRES_USER,
+)
+
+
 def _get_system_yaml_content() -> str:
-    """Return system.yaml content with postgres credentials filled from env vars."""
+    """Return system.yaml content with postgres credentials filled from env vars.
+
+    If system.yaml is missing on disk, auto-generates a default using:
+    1. judge_model stored in eval_datasets (user's UI selection)
+    2. model: field from PROMPT.md frontmatter
+    """
     if not EVAL_SYSTEM_CONFIG.exists():
-        raise FileNotFoundError(
-            "Eval system configuration not found. "
-            "Ensure the agent config is mounted and system.yaml is present."
+        judge_model = fetch_judge_model(AGENT_ORG, AGENT_NAME) or _read_prompt_model()
+        provider = _detect_provider(judge_model)
+        log.info(
+            "system.yaml not found — generating default with provider=%s model=%s",
+            provider,
+            judge_model,
+        )
+        return yaml.dump(
+            _default_system_yaml(judge_model, provider),
+            default_flow_style=False,
+            allow_unicode=True,
         )
 
     config = yaml.safe_load(EVAL_SYSTEM_CONFIG.read_text())
@@ -257,14 +444,17 @@ async def _run_eval_pattern(
 
 
 def _score_from_counts(passed: int, failed: int, errors: int) -> tuple[str, float]:
-    total = passed + failed + errors
-    if total == 0:
+    # Score is based on pass/(pass+fail) only — errors are excluded from the
+    # denominator so a metric configuration error doesn't penalise the agent.
+    scoreable = passed + failed
+    if scoreable == 0:
+        # All results are errors (or nothing ran)
         return "error", 0.0
-    score = round(passed / total, 3)
-    if errors > 0 and passed == 0:
-        status = "error"
-    elif passed == total:
+    score = round(passed / scoreable, 3)
+    if failed == 0 and errors == 0:
         status = "passed"
+    elif errors > 0 and failed == 0 and passed == 0:
+        status = "error"
     else:
         status = "failed"
     return status, score
@@ -316,9 +506,17 @@ async def _run_eval(
     try:
         await asyncio.gather(*[_run_one(f) for f in eval_files])
     finally:
+        # Clean up per-run temp files (tag-filtered eval YAMLs and system config)
         for tmp in tmp_files:
             tmp.unlink(missing_ok=True)
         system_yaml.unlink(missing_ok=True)
+        # Clean up eval output directory (populated YAMLs, CSVs, reports)
+        try:
+            import shutil
+
+            shutil.rmtree(run_output, ignore_errors=True)
+        except Exception:
+            pass
 
     total_pass, total_fail, total_error = 0, 0, 0
     eval_status, eval_score = _score_from_counts(total_pass, total_fail, total_error)
@@ -399,7 +597,7 @@ async def _run_eval(
         )
     except Exception as exc:
         log.error(
-            "postgres_write_failed (%s) — results still available locally",
+            "postgres_write_failed (%s) — eval results not persisted (output dir already cleaned up)",
             type(exc).__name__,
         )
 
@@ -462,20 +660,9 @@ async def _trigger(
         raise HTTPException(
             status_code=409, detail="An eval run is already in progress"
         )
-    if not EVAL_CASES_PATH.exists():
-        log.error("Eval trigger rejected — eval_cases not found: %s", EVAL_CASES_PATH)
-        raise HTTPException(
-            status_code=400,
-            detail="No eval dataset found. Add eval cases before running evaluation.",
-        )
-    if not EVAL_SYSTEM_CONFIG.exists():
-        log.error(
-            "Eval trigger rejected — system config not found: %s", EVAL_SYSTEM_CONFIG
-        )
-        raise HTTPException(
-            status_code=400,
-            detail="Eval system configuration not found. Ensure the agent config is mounted.",
-        )
+    # File-existence guards removed: _find_eval_files queries Postgres first and
+    # _get_system_yaml_content auto-generates system.yaml when absent on disk.
+    # Missing-dataset errors surface via FileNotFoundError from _find_eval_files.
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     config_hash = body.config_hash if body else None
     org = body.org if body else None

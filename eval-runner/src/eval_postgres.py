@@ -392,3 +392,170 @@ def get_results_by_run_id(run_id: str) -> list[dict[str, Any]]:
         raise
     log.info("get_results_by_run_id: run_id=%s returned %d rows", run_id, len(rows))
     return rows
+
+
+# ── Dataset access (eval_datasets table written by agentpod) ──────────────────
+
+from eval_cases import get_defaults_for_tag, get_tool_turn_metrics  # noqa: E402
+
+
+def _dataset_to_eval_cases(dataset: dict) -> list[dict]:
+    """Convert UI dataset JSON to the list[dict] format used by eval_cases.yaml.
+
+    Uses get_defaults_for_tag() from eval_cases — the single source of truth
+    for tag → metrics mapping. No duplicate mapping here.
+    """
+    cases = []
+    for tc in dataset.get("cases", []):
+        tag = tc.get("tag", "non_hitl")
+        tag_defaults = get_defaults_for_tag(tag)
+        metrics = tag_defaults.get("turn_metrics", ["custom:answer_correctness"])
+        turns = []
+        for i, turn in enumerate(tc.get("turns", []), 1):
+            turn_data: dict[str, Any] = {
+                "turn_id": turn.get("id", f"turn_{i}"),
+                "query": turn.get("userMessage", ""),
+                "expected_response": turn.get("expectedResponse", ""),
+                "turn_metrics": list(metrics),
+            }
+            # For HITL cases, mark only the LAST turn as the HITL turn.
+            # Earlier turns are normal info-gathering turns that don't need approval;
+            # only the final action turn (e.g. "email results") triggers the interrupt.
+            all_turns = tc.get("turns", [])
+            is_last_turn = i == len(all_turns)
+            if tag_defaults.get("hitl") and is_last_turn:
+                turn_data["hitl"] = True
+                if not turn.get("expectedIntent"):
+                    turn_data["expected_intent"] = (
+                        "request approval before taking action"
+                    )
+            elif turn.get("expectedIntent"):
+                turn_data["expected_intent"] = turn["expectedIntent"]
+                # Auto-add intent_eval when user specifies an expected intent
+                if "custom:intent_eval" not in turn_data["turn_metrics"]:
+                    turn_data["turn_metrics"].append("custom:intent_eval")
+            # expectedKeywords: list of AND-rows; each row is comma-separated OR values.
+            # Filter blank rows, auto-add keywords_eval metric when present.
+            raw_kw = [
+                r.strip() for r in turn.get("expectedKeywords", []) if str(r).strip()
+            ]
+            if raw_kw:
+                turn_data["expected_keywords"] = [
+                    [v.strip() for v in row.split(",") if v.strip()] for row in raw_kw
+                ]
+                if "custom:keywords_eval" not in turn_data["turn_metrics"]:
+                    turn_data["turn_metrics"].append("custom:keywords_eval")
+            if turn.get("toolCallEnabled") and turn.get("expectedToolCalls"):
+                tool_calls = []
+                for c in turn["expectedToolCalls"]:
+                    args = {
+                        a["key"]: (a["value"].strip() or ".*")
+                        for a in c.get("arguments", [])
+                        if a.get("key")
+                    }
+                    tool_calls.append(
+                        {
+                            "tool_name": c.get("toolName", ""),
+                            "arguments": args,
+                        }
+                    )
+
+                if tool_calls:
+                    # Format as N singleton sequences [[tc1], [tc2], ...] to match
+                    # run_eval.py's actual format [[tc] for tc in all_tool_calls].
+                    # _compare_tool_call_sequence requires len(expected)==len(actual)
+                    # per sequence — singletons satisfy this and let full_match=False
+                    # check that ALL expected tools appear (AND, not OR).
+                    # Argument values support regex (e.g. .* matches any value).
+                    turn_data["expected_tool_calls"] = [[tc] for tc in tool_calls]
+                    if "custom:tool_eval" not in turn_data["turn_metrics"]:
+                        turn_data["turn_metrics"].append("custom:tool_eval")
+                    # tool_turn_metrics (from tag_metrics.yaml) only apply when tool
+                    # calls are expected — e.g. ragas:faithfulness requires contexts
+                    # (tool results) and errors when no tools are called.
+                    for m in get_tool_turn_metrics():
+                        if m not in turn_data["turn_metrics"]:
+                            turn_data["turn_metrics"].append(m)
+                    turn_data.setdefault("turn_metrics_metadata", {})
+                    # ordered=True only reliable for orchestrator-level calls;
+                    # subagent calls fetched from Postgres checkpoint_blobs have
+                    # no guaranteed ordering — warn users via UI about this.
+                    turn_data["turn_metrics_metadata"]["custom:tool_eval"] = {
+                        "ordered": bool(turn.get("toolCallOrdered", False)),
+                        "full_match": False,
+                    }
+            turns.append(turn_data)
+
+        # If any turn expects tool calls, mark the case tag as tool_use so the
+        # eval runner fetches subagent tool calls from Postgres checkpoint_blobs.
+        # We preserve the original tag in the description for reference.
+        any_tool_calls = any(
+            t.get("toolCallEnabled") and t.get("expectedToolCalls")
+            for t in tc.get("turns", [])
+        )
+        effective_tag = "tool_use" if any_tool_calls else tag
+
+        case_entry: dict[str, Any] = {
+            "conversation_group_id": tc.get("name") or tc.get("id", ""),
+            "description": tc.get("description", f"tag:{tag}"),
+            "tag": effective_tag,
+            "turns": turns,
+        }
+        # Add conversation-level metrics if the tag defines them
+        conv_metrics = tag_defaults.get("conversation_metrics", [])
+        if conv_metrics:
+            case_entry["conversation_metrics"] = list(conv_metrics)
+        cases.append(case_entry)
+    return cases
+
+
+def fetch_dataset_cases(org: str, name: str) -> list[dict] | None:
+    """Fetch eval cases from eval_datasets and convert to eval_cases.yaml format.
+
+    Returns None if no dataset is stored for this org+name, or on error.
+    """
+    try:
+        conn = _get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT dataset FROM eval_datasets WHERE org=%s AND name=%s",
+                    (org, name),
+                )
+                row = cur.fetchone()
+        finally:
+            conn.close()
+
+        if not row:
+            return None
+
+        raw = row[0]
+        dataset = json.loads(raw) if isinstance(raw, str) else raw
+        cases = _dataset_to_eval_cases(dataset)
+        log.info(
+            "fetch_dataset_cases: org=%s name=%s → %d cases", org, name, len(cases)
+        )
+        return cases or None
+
+    except Exception as exc:
+        log.warning("fetch_dataset_cases failed: %s", exc)
+        return None
+
+
+def fetch_judge_model(org: str, name: str) -> str | None:
+    """Return the judge_model stored in eval_datasets, or None."""
+    try:
+        conn = _get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT judge_model FROM eval_datasets WHERE org=%s AND name=%s",
+                    (org, name),
+                )
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        return str(row[0]) if row and row[0] else None
+    except Exception as exc:
+        log.warning("fetch_judge_model failed: %s", exc)
+        return None

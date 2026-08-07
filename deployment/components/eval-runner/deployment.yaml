@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
         - name: eval-runner
-          image: localhost/template-agent-eval:local
+          image: eval-runner:latest
           imagePullPolicy: Never
           ports:
             - containerPort: 8099

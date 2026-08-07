@@ -51,7 +51,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,prefix={{branch}}-,enable=${{ !startsWith(github.ref, 'refs/tags/') }}
 
-      - name: Extract version for deployment package
+      - name: Extract version
         id: version
         run: |
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
@@ -60,7 +60,6 @@ jobs:
             VERSION="${GITHUB_REF#refs/heads/}-${GITHUB_SHA::7}"
           fi
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          echo "package_name=eval-runner-deployment.zip" >> $GITHUB_OUTPUT
 
       - name: Build image locally for scanning
         uses: docker/build-push-action@v5
@@ -197,49 +196,6 @@ jobs:
           path: /tmp/last-good-eval.json
           retention-days: 90
 
-      - name: Create deployment package metadata
-        run: |
-          cat > eval-runner/deployment/release-info.json <<EOF
-          {
-            "version": "${{ steps.version.outputs.version }}",
-            "git_ref": "${{ github.ref }}",
-            "git_sha": "${{ github.sha }}",
-            "build_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "container_image": "ghcr.io/${{ github.repository }}-eval:${{ steps.version.outputs.version }}",
-            "container_digest": "${{ steps.push.outputs.digest }}",
-            "repository": "${{ github.repository }}"
-          }
-          EOF
-          cat eval-runner/deployment/release-info.json
-
-      - name: Create deployment package
-        run: |
-          cd eval-runner/deployment
-          zip -r ../../${{ steps.version.outputs.package_name }} . -x "*.git*"
-          cd ../..
-          echo "Created package: ${{ steps.version.outputs.package_name }}"
-          ls -lh ${{ steps.version.outputs.package_name }}
-
-      - name: Generate checksums
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          FILES="${{ steps.version.outputs.package_name }}"
-          [ -f sbom-eval.cdx.json ] && FILES="$FILES sbom-eval.cdx.json"
-          [ -f trivy-report-eval.json ] && FILES="$FILES trivy-report-eval.json"
-          sha256sum $FILES > SHA256SUMS-eval.txt
-          cat SHA256SUMS-eval.txt
-
-      - name: Upload eval deployment package as artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: ${{ steps.version.outputs.package_name }}
-          path: |
-            ${{ steps.version.outputs.package_name }}
-            sbom-eval.cdx.json
-            trivy-report-eval.json
-            SHA256SUMS-eval.txt
-          retention-days: 90
-
       - name: Build summary
         run: |
           echo "### Eval Runner Image Built Successfully!" >> $GITHUB_STEP_SUMMARY
@@ -256,9 +212,4 @@ jobs:
           echo "docker pull ghcr.io/${{ github.repository }}-eval:${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Deployment Package:**" >> $GITHUB_STEP_SUMMARY
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            echo "📦 \`${{ steps.version.outputs.package_name }}\` attached to release" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "📦 \`${{ steps.version.outputs.package_name }}\` uploaded as workflow artifact" >> $GITHUB_STEP_SUMMARY
-          fi
+          echo "**Deployment:** managed via \`deployment/components/eval-runner/\` Kustomize component." >> $GITHUB_STEP_SUMMARY

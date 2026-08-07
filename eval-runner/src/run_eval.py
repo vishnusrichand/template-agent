@@ -35,7 +35,7 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import httpx
 import yaml
@@ -242,21 +242,19 @@ def _stream_one_request(  # pragma: no cover
     return events, _has_interrupt(events)
 
 
-def _extract_node_updates(data: Any) -> list[dict[str, Any]]:
-    """Return a flat list of node-update dicts from a LangGraph updates event.
+def _extract_node_updates(data: Any) -> Iterable[Any]:
+    """Return node-update dicts from a LangGraph updates event (iterable, no copy).
 
     Handles two formats emitted by the LangGraph Platform:
       - Top-level graph:  {"node_name": {messages: [...]}, ...}
       - Subgraph (stream_subgraphs=True): [["ns1", "ns2", ...], {"node_name": {...}}]
         The first element is the namespace tuple; the second is the actual update dict.
     """
-    # Subgraph format: [namespace_list, update_dict]
     if isinstance(data, list) and len(data) == 2 and isinstance(data[1], dict):
-        return list(data[1].values())
-    # Top-level format: {node_name: update_dict, ...}
+        return data[1].values()
     if isinstance(data, dict):
-        return list(data.values())
-    return []
+        return data.values()
+    return ()
 
 
 _INTERNAL_TOOLS = frozenset(
@@ -276,8 +274,13 @@ _INTERNAL_TOOLS = frozenset(
 
 def _collect_from_events(
     events: list[tuple[str, Any]],
-) -> tuple[list[str], list[dict[str, Any]], list[str]]:
-    """Extract (ai_text_blocks, tool_calls, tool_result_texts) from a batch of events.
+) -> tuple[list[str], list[dict[str, Any]], list[str], bool]:
+    """Extract (ai_text_blocks, tool_calls, tool_result_texts, ai_before_contexts) from events.
+
+    ai_before_contexts is True when the only AI text appeared BEFORE the first tool
+    result — the delegation pattern where the orchestrator greeted/handed off before
+    the subagent produced the actual answer. When False, the AI text came after tool
+    results and IS the real response.
 
     Uses two complementary event sources:
     - "updates" events  → final AI response text and tool-result contexts
@@ -289,8 +292,12 @@ def _collect_from_events(
     tool_calls: list[dict[str, Any]] = []
     contexts: list[str] = []
     seen_tool_runs: set[str] = set()  # deduplicate by run_id
+    last_ai_text_idx: int = -1  # position of last AI text in the event sequence
+    first_context_idx: int = -1  # position of first external tool result
+    event_pos: int = 0
 
     for event_type, raw_data in events:
+        event_pos += 1
         # When stream_mode is a list, LangGraph wraps data as ["mode", payload]
         data = (
             raw_data[1]
@@ -298,18 +305,59 @@ def _collect_from_events(
             else raw_data
         )
 
-        # ── on_tool_start: captures every MCP tool call at any depth ──────────
+        # ── on_tool_start / on_tool_end: captures MCP tool calls at any depth ──
         if event_type == "events" and isinstance(data, dict):
-            if data.get("event") == "on_tool_start":
-                name = data.get("name", "")
-                run_id = data.get("run_id", "")
+            event_name = data.get("event", "")
+            name = data.get("name", "")
+            run_id = data.get("run_id", "")
+
+            if event_name == "on_tool_start":
                 if name in _INTERNAL_TOOLS or (run_id and run_id in seen_tool_runs):
-                    continue
-                if run_id:
-                    seen_tool_runs.add(run_id)
-                args = data.get("data", {}).get("input", {})
-                if isinstance(args, dict):
-                    tool_calls.append({"tool_name": name, "arguments": args})
+                    pass
+                else:
+                    if run_id:
+                        seen_tool_runs.add(run_id)
+                    args = data.get("data", {}).get("input", {})
+                    if isinstance(args, dict):
+                        tool_calls.append({"tool_name": name, "arguments": args})
+
+            elif event_name == "on_tool_end":
+                # Collect tool outputs as contexts for ragas:faithfulness.
+                # on_tool_end output may be a plain string OR a LangChain ToolMessage
+                # dict like {"content": [{"type": "text", "text": "..."}], ...}.
+                # Extract just the text content so ragas gets clean output, not metadata.
+                if name and name not in _INTERNAL_TOOLS:
+                    output = data.get("data", {}).get("output", "")
+                    if output:
+                        if isinstance(output, dict):
+                            # LangChain ToolMessage: extract text from content list
+                            content = output.get("content", "")
+                            if isinstance(content, list):
+                                text = " ".join(
+                                    c.get("text", "")
+                                    for c in content
+                                    if isinstance(c, dict) and c.get("type") == "text"
+                                )
+                            elif isinstance(content, str):
+                                text = content
+                            else:
+                                text = ""  # don't stringify unknown content types
+                        elif isinstance(output, list):
+                            # list of content blocks — extract text items
+                            text = " ".join(
+                                c.get("text", "")
+                                for c in output
+                                if isinstance(c, dict) and c.get("type") == "text"
+                            )
+                        elif isinstance(output, str):
+                            text = output
+                        else:
+                            text = ""  # don't stringify unknown output types
+                        if text.strip():
+                            if first_context_idx == -1:
+                                first_context_idx = event_pos
+                            contexts.append(text.strip())
+
             continue
 
         # ── updates: AI response text, tool calls, tool-result contexts ─────
@@ -317,7 +365,7 @@ def _collect_from_events(
             continue
         for update in _extract_node_updates(data):  # data already unwrapped above
             if not isinstance(update, dict):
-                continue  # type: ignore[unreachable]
+                continue
             for msg in update.get("messages", []):
                 if not isinstance(msg, dict):
                     continue
@@ -326,6 +374,7 @@ def _collect_from_events(
                     text = _extract_text(msg.get("content", ""))
                     if text:
                         ai_texts.append(text)
+                        last_ai_text_idx = event_pos
                     for tc in msg.get("tool_calls", []):
                         resolved = _resolve_tool_name(tc)
                         if resolved not in _INTERNAL_TOOLS:
@@ -336,11 +385,25 @@ def _collect_from_events(
                                 }
                             )
                 elif msg_type == "tool":
+                    # Skip results from internal housekeeping tools — their outputs
+                    # (todo updates, task status, etc.) are not user-facing context.
+                    if msg.get("name", "") in _INTERNAL_TOOLS:
+                        continue
                     content = _extract_text(msg.get("content", ""))
                     if content:
+                        if first_context_idx == -1:
+                            first_context_idx = event_pos
                         contexts.append(content)
 
-    return ai_texts, tool_calls, contexts
+    # Delegation pattern: AI text appeared BEFORE any tool result in the stream.
+    # True → orchestrator greeted/delegated before the subagent answered.
+    # False → AI text came after tool results → it IS the real response.
+    ai_before_contexts = (
+        last_ai_text_idx != -1
+        and first_context_idx != -1
+        and last_ai_text_idx < first_context_idx
+    )
+    return ai_texts, tool_calls, contexts, ai_before_contexts
 
 
 def _last_nonempty(texts: list[str]) -> str:
@@ -381,10 +444,11 @@ def _call_agent(  # pragma: no cover
     events, interrupted = _stream_one_request(
         agent_url, thread_id, body, auth_token, timeout
     )
-    ai_texts, tcs, ctxs = _collect_from_events(events)
+    ai_texts, tcs, ctxs, ai_before_ctx = _collect_from_events(events)
     all_ai_texts.extend(ai_texts)
     all_tool_calls.extend(tcs)
     all_contexts.extend(ctxs)
+    delegation_pattern = ai_before_ctx  # greeting before tool results
 
     if interrupted:
         was_interrupted = True
@@ -409,10 +473,15 @@ def _call_agent(  # pragma: no cover
         events, interrupted = _stream_one_request(
             agent_url, thread_id, resume_body, auth_token, timeout
         )
-        ai_texts, tcs, ctxs = _collect_from_events(events)
+        ai_texts, tcs, ctxs, ai_before_ctx = _collect_from_events(events)
         all_ai_texts.extend(ai_texts)
         all_tool_calls.extend(tcs)
         all_contexts.extend(ctxs)
+        # Update based on the most recent non-empty stream: if this stream
+        # produced AI text AFTER contexts (real final response), cancel any
+        # earlier delegation flag so we don't override with raw tool output.
+        if ai_texts:
+            delegation_pattern = ai_before_ctx
 
     if interrupted:
         log.warning(
@@ -420,6 +489,19 @@ def _call_agent(  # pragma: no cover
         )
 
     final_response = _last_nonempty(all_ai_texts)
+
+    # Delegation pattern: orchestrator greeted/handed off BEFORE the tool results
+    # arrived. The subagent's output is in contexts, not a second AI message.
+    # Only apply when ordering confirms the AI text came before any tool result
+    # (greeting → delegate → subagent answers via context).
+    # Not applied when AI text came AFTER tool results (= real human-readable response).
+    if delegation_pattern and all_contexts:
+        last_ctx = all_contexts[-1].strip()
+        if last_ctx:
+            log.debug(
+                "Delegation pattern (AI before contexts) — using last context as scored response"
+            )
+            final_response = last_ctx
 
     return {
         "response": final_response,
@@ -433,6 +515,60 @@ def _call_agent(  # pragma: no cover
 # ── Dataset population ───────────────────────────────────────────────────────
 
 _AGENT_ERROR_RESPONSE = "[agent error: no response collected]"
+
+
+def _strip_args_for_no_arg_expected(
+    actual_calls: list[dict],
+    expected_tool_calls: list[list[dict]],
+) -> list[dict]:
+    """Strip arguments from actual calls for tools whose expected has no arguments.
+
+    lightspeed-eval's _compare_tool_arguments fails when actual has extra keys
+    not present in expected (even when expected args is empty {}). Stripping
+    arguments from the actual call for those tools makes the comparison {}=={},
+    implementing "match tool name only, any arguments" semantics from the UI.
+    """
+    # Collect tool names where expected arguments are empty / absent
+    no_arg_tools: set[str] = set()
+    for pattern in expected_tool_calls:
+        for tc in pattern:
+            if not tc.get("arguments"):  # None, {}, or missing
+                no_arg_tools.add(tc.get("tool_name", ""))
+
+    if not no_arg_tools:
+        return actual_calls
+
+    modified = False
+    result = []
+    for tc in actual_calls:
+        if tc.get("tool_name") in no_arg_tools:
+            result.append({"tool_name": tc["tool_name"]})
+            modified = True
+        else:
+            result.append(tc)
+    return result if modified else actual_calls  # skip copy when nothing stripped
+
+
+def _dedup_tool_calls(tool_calls: list[dict]) -> list[dict]:
+    """Remove duplicate tool calls keeping the first occurrence.
+
+    Duplicates arise when the orchestrator SSE stream and the subagent
+    checkpoint_blobs both surface the same call (e.g. calculate_bmi).
+    Two calls are considered equal when tool_name and arguments match.
+    """
+    seen: set[str] = set()
+    unique: list[dict] = []
+    for tc in tool_calls:
+        # Use tool_name + null-separator + serialised args; avoids a throwaway dict
+        key = (
+            tc.get("tool_name", "")
+            + "\x00"
+            + json.dumps(tc.get("arguments", {}), sort_keys=True)
+        )
+        if key not in seen:
+            seen.add(key)
+            unique.append(tc)
+    return unique
 
 
 def _fetch_subagent_tool_calls(  # pragma: no cover
@@ -465,13 +601,11 @@ def _fetch_subagent_tool_calls(  # pragma: no cover
                 tool_calls = resp.json().get("tool_calls", [])
             if tool_calls:
                 return tool_calls  # type: ignore[no-any-return]
-            # Empty result — subagent checkpoint may not be flushed yet.
-            if attempt < retries - 1:
-                time.sleep(retry_delay * (attempt + 1))
         except Exception as exc:
             last_exc = exc
-            if attempt < retries - 1:
-                time.sleep(retry_delay * (attempt + 1))
+        # Sleep before retry regardless of whether the attempt failed or returned empty.
+        if attempt < retries - 1:
+            time.sleep(retry_delay * (attempt + 1))
     if last_exc:
         log.warning(
             "subagent_tool_calls_fetch_failed after %d attempts (%s): %s",
@@ -545,12 +679,31 @@ def _populate_group(  # pragma: no cover
             )
             all_tool_calls.extend(subagent_tcs)
 
+        # Deduplicate: orchestrator stream and subagent checkpoint can both surface
+        # the same call (e.g. calculate_bmi appears in the SSE trace AND in blobs).
+        all_tool_calls = _dedup_tool_calls(all_tool_calls)
+
+        # Strip arguments from actual calls for tools whose expected has no arguments.
+        # This makes tool-name-only matching work without breaking strict arg checks.
+        expected_tc = turn.get("expected_tool_calls") or []
+        if expected_tc:
+            all_tool_calls = _strip_args_for_no_arg_expected(
+                all_tool_calls, expected_tc
+            )
+
         if all_tool_calls:
             # Each tool call in its own sequence so partial matching works correctly.
             # [[tc1], [tc2], ...] lets tool_eval find a single expected tool among many.
             turn["tool_calls"] = [[tc] for tc in all_tool_calls]
         if result["contexts"]:
             turn["contexts"] = result["contexts"]
+        else:
+            # No tool results — ragas:faithfulness requires at least 1 context item.
+            # Remove it from turn_metrics so lightspeed-eval doesn't error.
+            if "ragas:faithfulness" in turn.get("turn_metrics", []):
+                turn["turn_metrics"] = [
+                    m for m in turn["turn_metrics"] if m != "ragas:faithfulness"
+                ]
 
         log.info(
             "[%s] turn=%s done mode=%s tool_calls=%d",
@@ -595,14 +748,16 @@ def _populate_dataset(  # pragma: no cover
 
 def _find_lightspeed_cmd() -> list[str] | None:
     """Return the command to invoke lightspeed-eval, or None if not found."""
+    import shutil  # noqa: PLC0415 — stdlib, no install needed
+
     venv_bin = Path(sys.executable).parent
     for name in ["lightspeed-eval", "lightspeed_eval"]:
         candidate = venv_bin / name
         if candidate.exists():
             return [str(candidate)]
-        which = subprocess.run(["which", name], capture_output=True, text=True)
-        if which.returncode == 0:
-            return [which.stdout.strip()]
+        found = shutil.which(name)
+        if found:
+            return [found]
     return None
 
 

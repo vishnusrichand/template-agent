@@ -142,21 +142,21 @@ def test_unwrap_other_returns_empty():
 
 def test_extract_node_updates_top_level_dict():
     data = {"agent": {"messages": [{"type": "ai", "content": "hi"}]}}
-    updates = run_eval._extract_node_updates(data)
+    updates = list(run_eval._extract_node_updates(data))  # iterable now
     assert len(updates) == 1
     assert updates[0]["messages"][0]["content"] == "hi"
 
 
 def test_extract_node_updates_subgraph_list_format():
     data = [["ns1", "ns2"], {"agent": {"messages": []}}]
-    updates = run_eval._extract_node_updates(data)
+    updates = list(run_eval._extract_node_updates(data))  # iterable now
     assert len(updates) == 1
     assert updates[0] == {"messages": []}
 
 
 def test_extract_node_updates_invalid_returns_empty():
-    assert run_eval._extract_node_updates("bad") == []
-    assert run_eval._extract_node_updates([]) == []
+    assert list(run_eval._extract_node_updates("bad")) == []
+    assert list(run_eval._extract_node_updates([])) == []
 
 
 # ── _has_interrupt ────────────────────────────────────────────────────────────
@@ -269,7 +269,7 @@ def test_collect_from_events_ai_message():
             },
         )
     ]
-    texts, tcs, ctxs = run_eval._collect_from_events(events)
+    texts, tcs, ctxs, _abc = run_eval._collect_from_events(events)
     assert "BMI is 22.9" in texts
 
 
@@ -285,7 +285,7 @@ def test_collect_from_events_tool_start_event():
             },
         )
     ]
-    texts, tcs, ctxs = run_eval._collect_from_events(events)
+    texts, tcs, ctxs, _abc = run_eval._collect_from_events(events)
     assert any(tc["tool_name"] == "calculate_bmi" for tc in tcs)
 
 
@@ -301,7 +301,7 @@ def test_collect_from_events_internal_tools_excluded():
             },
         )
     ]
-    texts, tcs, ctxs = run_eval._collect_from_events(events)
+    texts, tcs, ctxs, _abc = run_eval._collect_from_events(events)
     assert tcs == []
 
 
@@ -312,13 +312,13 @@ def test_collect_from_events_tool_result_captured_as_context():
             {"agent": {"messages": [{"type": "tool", "content": "BMI result: 22.9"}]}},
         )
     ]
-    texts, tcs, ctxs = run_eval._collect_from_events(events)
+    texts, tcs, ctxs, _abc = run_eval._collect_from_events(events)
     assert "BMI result: 22.9" in ctxs
 
 
 def test_collect_from_events_tool_message_with_empty_content():
     events = [("updates", {"agent": {"messages": [{"type": "tool", "content": ""}]}})]
-    texts, tcs, ctxs = run_eval._collect_from_events(events)
+    texts, tcs, ctxs, _abc = run_eval._collect_from_events(events)
     assert ctxs == []
 
 
@@ -343,12 +343,12 @@ def test_collect_from_events_deduplicates_tool_calls_by_run_id():
             },
         ),
     ]
-    texts, tcs, ctxs = run_eval._collect_from_events(events)
+    texts, tcs, ctxs, _abc = run_eval._collect_from_events(events)
     assert len(tcs) == 1
 
 
 def test_collect_from_events_empty():
-    texts, tcs, ctxs = run_eval._collect_from_events([])
+    texts, tcs, ctxs, _abc = run_eval._collect_from_events([])
     assert texts == tcs == ctxs == []
 
 
@@ -371,7 +371,7 @@ def test_collect_from_events_ai_tool_calls_from_updates():
             },
         )
     ]
-    texts, tcs, ctxs = run_eval._collect_from_events(events)
+    texts, tcs, ctxs, _abc = run_eval._collect_from_events(events)
     assert any(tc["tool_name"] == "calculate_bmi" for tc in tcs)
 
 
@@ -391,7 +391,7 @@ def test_collect_from_events_stream_mode_list_wrapper():
             ],
         )
     ]
-    texts, tcs, ctxs = run_eval._collect_from_events(events)
+    texts, tcs, ctxs, _abc = run_eval._collect_from_events(events)
     assert "wrapped" in texts
 
 
@@ -403,7 +403,7 @@ def test_collect_from_events_skips_invalid_update_and_message():
             {"node": {"messages": ["not-a-dict", {"type": "tool", "content": ""}]}},
         ),
     ]
-    texts, tcs, ctxs = run_eval._collect_from_events(events)
+    texts, tcs, ctxs, _abc = run_eval._collect_from_events(events)
     assert texts == tcs == ctxs == []
 
 
@@ -424,7 +424,7 @@ def test_collect_from_events_excludes_internal_ai_tool_calls():
             },
         )
     ]
-    texts, tcs, ctxs = run_eval._collect_from_events(events)
+    texts, tcs, ctxs, _abc = run_eval._collect_from_events(events)
     assert tcs == []
 
 
@@ -449,13 +449,13 @@ def test_collect_from_events_skips_duplicate_run_id():
             },
         ),
     ]
-    texts, tcs, ctxs = run_eval._collect_from_events(events)
+    texts, tcs, ctxs, _abc = run_eval._collect_from_events(events)
     assert len(tcs) == 1
 
 
 def test_collect_from_events_non_tool_start_event_ignored():
     events = [("events", {"event": "on_chain_start", "name": "agent"})]
-    texts, tcs, ctxs = run_eval._collect_from_events(events)
+    texts, tcs, ctxs, _abc = run_eval._collect_from_events(events)
     assert tcs == []
 
 
@@ -471,7 +471,7 @@ def test_collect_from_events_tool_start_without_run_id():
             },
         )
     ]
-    texts, tcs, ctxs = run_eval._collect_from_events(events)
+    texts, tcs, ctxs, _abc = run_eval._collect_from_events(events)
     assert len(tcs) == 1
 
 
@@ -487,14 +487,137 @@ def test_collect_from_events_tool_start_non_dict_args():
             },
         )
     ]
-    texts, tcs, ctxs = run_eval._collect_from_events(events)
+    texts, tcs, ctxs, _abc = run_eval._collect_from_events(events)
     assert tcs == []
 
 
 def test_collect_from_events_ignores_unknown_event_type():
     events = [("message", {"data": "ignored"})]
-    texts, tcs, ctxs = run_eval._collect_from_events(events)
+    texts, tcs, ctxs, _abc = run_eval._collect_from_events(events)
     assert texts == tcs == ctxs == []
+
+
+# ── _collect_from_events: on_tool_end and ai_before_ctx ─────────────────────
+
+
+def test_collect_from_events_on_tool_end_plain_string():
+    """on_tool_end with plain string output → added to contexts."""
+    events = [
+        ("events", {"event": "on_tool_end", "name": "calculate_bmi",
+                    "run_id": "r1", "data": {"output": '{"bmi": 22.9}'}})
+    ]
+    texts, tcs, ctxs, ai_before_ctx = run_eval._collect_from_events(events)
+    assert '{"bmi": 22.9}' in ctxs
+    assert ai_before_ctx is False  # no AI text seen
+
+
+def test_collect_from_events_on_tool_end_dict_with_content_list():
+    """on_tool_end with LangChain ToolMessage dict → extracts text content."""
+    output = {"content": [{"type": "text", "text": "BMI is 22.9"}], "type": "tool"}
+    events = [
+        ("events", {"event": "on_tool_end", "name": "calculate_bmi",
+                    "run_id": "r1", "data": {"output": output}})
+    ]
+    texts, tcs, ctxs, ai_before_ctx = run_eval._collect_from_events(events)
+    assert "BMI is 22.9" in ctxs
+
+
+def test_collect_from_events_on_tool_end_list_output():
+    """on_tool_end with list of content blocks → extracts text items."""
+    output = [{"type": "text", "text": "result text"}, {"type": "image"}]
+    events = [
+        ("events", {"event": "on_tool_end", "name": "search_web",
+                    "run_id": "r1", "data": {"output": output}})
+    ]
+    texts, tcs, ctxs, ai_before_ctx = run_eval._collect_from_events(events)
+    assert "result text" in ctxs
+
+
+def test_collect_from_events_on_tool_end_internal_tool_excluded():
+    """on_tool_end for internal tools → not added to contexts."""
+    events = [
+        ("events", {"event": "on_tool_end", "name": "write_todos",
+                    "run_id": "r1", "data": {"output": "Updated todo list"}})
+    ]
+    texts, tcs, ctxs, _ = run_eval._collect_from_events(events)
+    assert ctxs == []
+
+
+def test_collect_from_events_ai_before_ctx_true():
+    """AI text before context → ai_before_ctx True (delegation pattern)."""
+    events = [
+        ("updates", {"agent": {"messages": [{"type": "ai", "content": "Welcome!"}]}}),
+        ("events", {"event": "on_tool_end", "name": "calculate_bmi",
+                    "run_id": "r1", "data": {"output": '{"bmi": 22.9}'}})
+    ]
+    texts, tcs, ctxs, ai_before_ctx = run_eval._collect_from_events(events)
+    assert ai_before_ctx is True
+
+
+def test_collect_from_events_ai_after_ctx_false():
+    """Context before AI text → ai_before_ctx False (real response)."""
+    events = [
+        ("events", {"event": "on_tool_end", "name": "calculate_bmi",
+                    "run_id": "r1", "data": {"output": '{"bmi": 22.9}'}}),
+        ("updates", {"agent": {"messages": [{"type": "ai", "content": "Your BMI is 22.9"}]}})
+    ]
+    texts, tcs, ctxs, ai_before_ctx = run_eval._collect_from_events(events)
+    assert ai_before_ctx is False
+
+
+def test_collect_from_events_no_ai_no_context_false():
+    """No AI text and no context → ai_before_ctx False."""
+    events = [("updates", {"agent": {"messages": []}})]
+    texts, tcs, ctxs, ai_before_ctx = run_eval._collect_from_events(events)
+    assert ai_before_ctx is False
+
+
+# ── _dedup_tool_calls ─────────────────────────────────────────────────────────
+
+
+def test_dedup_tool_calls_removes_duplicates():
+    calls = [
+        {"tool_name": "calculate_bmi", "arguments": {"height_cm": 175}},
+        {"tool_name": "calculate_bmi", "arguments": {"height_cm": 175}},
+        {"tool_name": "search_web", "arguments": {"query": "tips"}},
+    ]
+    result = run_eval._dedup_tool_calls(calls)
+    assert len(result) == 2
+    assert result[0]["tool_name"] == "calculate_bmi"
+
+
+def test_dedup_tool_calls_different_args_kept():
+    calls = [
+        {"tool_name": "calculate_bmi", "arguments": {"height_cm": 175}},
+        {"tool_name": "calculate_bmi", "arguments": {"height_cm": 180}},
+    ]
+    result = run_eval._dedup_tool_calls(calls)
+    assert len(result) == 2
+
+
+# ── _strip_args_for_no_arg_expected ──────────────────────────────────────────
+
+
+def test_strip_args_removes_args_for_no_arg_tools():
+    actual = [{"tool_name": "calculate_bmi", "arguments": {"height_cm": 175, "weight_kg": 70}}]
+    expected = [[{"tool_name": "calculate_bmi"}]]  # no arguments key
+    result = run_eval._strip_args_for_no_arg_expected(actual, expected)
+    assert result[0] == {"tool_name": "calculate_bmi"}
+    assert "arguments" not in result[0]
+
+
+def test_strip_args_keeps_args_when_expected_has_args():
+    actual = [{"tool_name": "calculate_bmi", "arguments": {"height_cm": 175}}]
+    expected = [[{"tool_name": "calculate_bmi", "arguments": {"height_cm": ".*"}}]]
+    result = run_eval._strip_args_for_no_arg_expected(actual, expected)
+    assert result[0]["arguments"] == {"height_cm": 175}  # args preserved
+
+
+def test_strip_args_returns_original_when_no_stripping_needed():
+    actual = [{"tool_name": "search_web", "arguments": {"query": "tips"}}]
+    expected = [[{"tool_name": "calculate_bmi"}]]  # different tool
+    result = run_eval._strip_args_for_no_arg_expected(actual, expected)
+    assert result is actual  # same object — no copy
 
 
 # ── _subprocess_env ───────────────────────────────────────────────────────────
@@ -679,13 +802,11 @@ def test_find_lightspeed_cmd_from_venv_bin(tmp_path, monkeypatch):
     assert result == [str(fake_bin / "lightspeed-eval")]
 
 
-def test_find_lightspeed_cmd_via_which(monkeypatch):
+def test_find_lightspeed_cmd_via_shutil_which(monkeypatch):
+    # Now uses shutil.which (local import inside the function)
     monkeypatch.setattr(run_eval.sys, "executable", "/usr/bin/python3")
     with patch.object(Path, "exists", return_value=False):
-        which_result = MagicMock(
-            returncode=0, stdout="/usr/local/bin/lightspeed-eval\n"
-        )
-        with patch("run_eval.subprocess.run", return_value=which_result):
+        with patch("shutil.which", return_value="/usr/local/bin/lightspeed-eval"):
             result = run_eval._find_lightspeed_cmd()
     assert result == ["/usr/local/bin/lightspeed-eval"]
 
@@ -693,8 +814,7 @@ def test_find_lightspeed_cmd_via_which(monkeypatch):
 def test_find_lightspeed_cmd_not_found(monkeypatch):
     monkeypatch.setattr(run_eval.sys, "executable", "/usr/bin/python3")
     with patch.object(Path, "exists", return_value=False):
-        which_result = MagicMock(returncode=1, stdout="")
-        with patch("run_eval.subprocess.run", return_value=which_result):
+        with patch("shutil.which", return_value=None):
             result = run_eval._find_lightspeed_cmd()
     assert result is None
 

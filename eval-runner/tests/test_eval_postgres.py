@@ -372,3 +372,125 @@ def test_get_results_by_run_id_empty(mock_psycopg2_conn):
     with patch("eval_postgres._get_conn", return_value=conn):
         rows = eval_postgres.get_results_by_run_id("nonexistent")
     assert rows == []
+
+
+# ── _dataset_to_eval_cases ────────────────────────────────────────────────────
+
+
+def _make_dataset(cases):
+    return {"cases": cases}
+
+
+def _simple_turn(user_msg="What is my BMI?", expected="Your BMI is 22.9"):
+    return {
+        "id": "t1",
+        "userMessage": user_msg,
+        "expectedResponse": expected,
+        "expectedIntent": "",
+        "expectedKeywords": [""],
+        "toolCallEnabled": False,
+        "toolCallOrdered": False,
+        "expectedToolCalls": [],
+    }
+
+
+def test_dataset_to_eval_cases_basic():
+    tc = {
+        "id": "abc",
+        "name": "calc_bmi",
+        "description": "BMI test",
+        "tag": "non_hitl",
+        "turns": [_simple_turn()],
+        "createdAt": "2026-01-01T00:00:00Z",
+    }
+    cases = eval_postgres._dataset_to_eval_cases(_make_dataset([tc]))
+    assert len(cases) == 1
+    c = cases[0]
+    assert c["conversation_group_id"] == "calc_bmi"
+    assert c["tag"] == "non_hitl"
+    assert len(c["turns"]) == 1
+    assert c["turns"][0]["query"] == "What is my BMI?"
+
+
+def test_dataset_to_eval_cases_auto_adds_metrics():
+    tc = {
+        "id": "abc", "name": "calc_bmi", "description": "",
+        "tag": "non_hitl",
+        "turns": [_simple_turn()],
+        "createdAt": "2026-01-01",
+    }
+    cases = eval_postgres._dataset_to_eval_cases(_make_dataset([tc]))
+    metrics = cases[0]["turns"][0]["turn_metrics"]
+    assert "custom:answer_correctness" in metrics
+    assert "geval:tone_safety" in metrics
+
+
+def test_dataset_to_eval_cases_tool_call_enabled():
+    turn = {**_simple_turn(), "toolCallEnabled": True, "toolCallOrdered": False,
+            "expectedToolCalls": [{"toolName": "calculate_bmi", "arguments": []}]}
+    tc = {"id": "abc", "name": "bmi", "description": "", "tag": "non_hitl",
+          "turns": [turn], "createdAt": "2026-01-01"}
+    cases = eval_postgres._dataset_to_eval_cases(_make_dataset([tc]))
+    c = cases[0]
+    assert c["tag"] == "tool_use"  # promoted when tool calls present
+    t = c["turns"][0]
+    assert "custom:tool_eval" in t["turn_metrics"]
+    assert "ragas:faithfulness" in t["turn_metrics"]
+    assert t.get("expected_tool_calls") is not None
+
+
+def test_dataset_to_eval_cases_tool_call_with_args():
+    turn = {**_simple_turn(), "toolCallEnabled": True, "toolCallOrdered": False,
+            "expectedToolCalls": [{"toolName": "calculate_bmi",
+                                   "arguments": [{"key": "height_cm", "value": ""}]}]}
+    tc = {"id": "abc", "name": "bmi", "description": "", "tag": "non_hitl",
+          "turns": [turn], "createdAt": "2026-01-01"}
+    cases = eval_postgres._dataset_to_eval_cases(_make_dataset([tc]))
+    t = cases[0]["turns"][0]
+    # Empty value should become ".*"
+    assert t["expected_tool_calls"][0][0]["arguments"]["height_cm"] == ".*"
+
+
+def test_dataset_to_eval_cases_intent_adds_metric():
+    turn = {**_simple_turn(), "expectedIntent": "calculate BMI"}
+    tc = {"id": "abc", "name": "bmi", "description": "", "tag": "non_hitl",
+          "turns": [turn], "createdAt": "2026-01-01"}
+    cases = eval_postgres._dataset_to_eval_cases(_make_dataset([tc]))
+    t = cases[0]["turns"][0]
+    assert t["expected_intent"] == "calculate BMI"
+    assert "custom:intent_eval" in t["turn_metrics"]
+
+
+def test_dataset_to_eval_cases_keywords_adds_metric():
+    turn = {**_simple_turn(), "expectedKeywords": ["Normal, 22.9"]}
+    tc = {"id": "abc", "name": "bmi", "description": "", "tag": "non_hitl",
+          "turns": [turn], "createdAt": "2026-01-01"}
+    cases = eval_postgres._dataset_to_eval_cases(_make_dataset([tc]))
+    t = cases[0]["turns"][0]
+    assert "custom:keywords_eval" in t["turn_metrics"]
+    assert t["expected_keywords"] == [["Normal", "22.9"]]
+
+
+def test_dataset_to_eval_cases_hitl_last_turn_only():
+    turns = [_simple_turn("turn 1"), _simple_turn("turn 2")]
+    tc = {"id": "abc", "name": "hitl", "description": "", "tag": "hitl",
+          "turns": turns, "createdAt": "2026-01-01"}
+    cases = eval_postgres._dataset_to_eval_cases(_make_dataset([tc]))
+    t_last = cases[0]["turns"][-1]
+    t_first = cases[0]["turns"][0]
+    assert t_last.get("hitl") is True
+    assert t_last.get("expected_intent") == "request approval before taking action"
+    assert t_first.get("hitl") is None  # NOT applied to first turn
+
+
+def test_dataset_to_eval_cases_multi_turn_conversation_metrics():
+    turns = [_simple_turn("t1"), _simple_turn("t2")]
+    tc = {"id": "abc", "name": "multi", "description": "", "tag": "multi_turn",
+          "turns": turns, "createdAt": "2026-01-01"}
+    cases = eval_postgres._dataset_to_eval_cases(_make_dataset([tc]))
+    assert "deepeval:knowledge_retention" in cases[0].get("conversation_metrics", [])
+
+
+def test_dataset_to_eval_cases_empty_dataset():
+    cases = eval_postgres._dataset_to_eval_cases({"cases": []})
+    assert cases == []

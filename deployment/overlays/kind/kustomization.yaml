@@ -10,10 +10,11 @@ resources:
   - ui.yaml
   - ingress.yaml
 
-# Include postgres and redis for local development
+# Include postgres, redis, and eval-runner for local development
 components:
   - ../../components/postgres
   - ../../components/redis
+  - ../../components/eval-runner
 
 labels:
   - pairs:
@@ -25,4 +26,7 @@ images:
     newTag: local
   - name: template-ui
     newName: localhost/template-ui
+    newTag: local
+  - name: eval-runner
+    newName: localhost/template-agent-eval
     newTag: local

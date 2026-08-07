@@ -17,6 +17,7 @@
 ## Services (always):
 ##   pgvector              - Postgres (agent checkpoints)
 ##   redis                 - Aegra broker (SSE streaming, job queue)
+##   eval-runner           - Eval runner sidecar (port 8099)
 ##   template-agent        - Agent (port 5002)
 ##
 ## Services (demo profile):
@@ -64,6 +65,44 @@ services:
       retries: 5
     networks:
       - agent-network
+
+  eval-runner:
+    build:
+      context: ./eval-runner
+      dockerfile: Containerfile
+    container_name: template-agent-eval-runner
+    ports:
+      - "8099:8099"
+    environment:
+      AGENT_HOST: "http://host.containers.internal:5002"
+      AGENT_CONFIG_DIR: "/agent-config"
+      AI_PLATFORM_AGENT_ORG: "demo"
+      AI_PLATFORM_AGENT_NAME: "template-agent"
+      POSTGRES_HOST: "pgvector"
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: "template_agent"
+      POSTGRES_USER: "postgres"
+      POSTGRES_PASSWORD: "postgres"
+    env_file:
+      - .env
+    volumes:
+      - ./config/agent:/agent-config:ro
+    depends_on:
+      pgvector:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://0.0.0.0:8099/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    extra_hosts:
+      - "host.containers.internal:host-gateway"
+    networks:
+      - agent-network
+    restart: unless-stopped
 
   template-agent:
     profiles: [container, observability]

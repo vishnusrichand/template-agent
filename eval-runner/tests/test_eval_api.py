@@ -33,9 +33,10 @@ def test_score_from_counts_all_error():
 
 
 def test_score_from_counts_some_error_with_pass():
+    # Errors excluded from denominator: score = pass/(pass+fail) = 5/8
     status, score = eval_api._score_from_counts(5, 3, 2)
     assert status == "failed"
-    assert score == pytest.approx(0.5)
+    assert score == pytest.approx(5 / 8)
 
 
 def test_score_from_counts_zero_total():
@@ -172,12 +173,19 @@ def test_get_system_yaml_injects_port_db_user(system_yaml_file, monkeypatch):
     assert backend["user"] == "evaluser"
 
 
-def test_get_system_yaml_missing_file_raises(tmp_path):
+def test_get_system_yaml_missing_file_auto_generates(tmp_path, monkeypatch):
+    # When EVAL_SYSTEM_CONFIG doesn't exist, content is auto-generated from
+    # the stored judge model / PROMPT.md — no FileNotFoundError raised.
+    from unittest.mock import patch
     orig = eval_api.EVAL_SYSTEM_CONFIG
     eval_api.EVAL_SYSTEM_CONFIG = tmp_path / "nonexistent.yaml"
     try:
-        with pytest.raises(FileNotFoundError):
-            eval_api._get_system_yaml_content()
+        with patch("eval_api.fetch_judge_model", return_value=None), \
+             patch("eval_api._read_prompt_model", return_value=("vertex", "gemini-2.5-pro")), \
+             patch("eval_api._detect_provider", return_value="vertex"):
+            content = eval_api._get_system_yaml_content()
+        assert "gemini-2.5-pro" in content
+        assert "judge" in content
     finally:
         eval_api.EVAL_SYSTEM_CONFIG = orig
 
@@ -447,16 +455,12 @@ def test_run_all_409_when_running(api_client):
     assert resp.status_code == 409
 
 
-def test_run_all_400_when_cases_missing(tmp_path, api_client):
-    eval_api.EVAL_CASES_PATH = tmp_path / "missing.yaml"
-    resp = api_client.post("/evals/run", json={})
-    assert resp.status_code == 400
-
-
-def test_run_all_400_when_system_missing(tmp_path, api_client):
-    eval_api.EVAL_SYSTEM_CONFIG = tmp_path / "missing.yaml"
-    resp = api_client.post("/evals/run", json={})
-    assert resp.status_code == 400
+def test_run_all_accepts_request_without_files(api_client):
+    # File-existence guards were removed — the trigger schedules the run regardless.
+    # The background task handles missing files via Postgres fallback.
+    with patch("eval_api._run_eval"):
+        resp = api_client.post("/evals/run", json={})
+    assert resp.status_code == 202
 
 
 def test_run_pattern_valid(api_client):

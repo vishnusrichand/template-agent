@@ -107,8 +107,8 @@ local:
 	@lsof -ti :5002 | xargs kill -9 2>/dev/null || true
 	@echo "Cleaning up stale containers from previous naming scheme..."
 	@podman rm -f demo-pgvector demo-redis 2>/dev/null || true
-	@echo "Starting infrastructure (Postgres + Redis)..."
-	@export PODMAN_COMPOSE_SILENT=true && podman-compose -f compose.yaml up -d pgvector redis
+	@echo "Starting infrastructure (Postgres + Redis + Eval Runner)..."
+	@export PODMAN_COMPOSE_SILENT=true && podman-compose -f compose.yaml up -d --build pgvector redis eval-runner
 	@echo "Waiting for Postgres to be ready..."
 	@until podman exec template-agent-pgvector pg_isready -U postgres -q 2>/dev/null; do sleep 1; done
 	@podman exec template-agent-pgvector psql -U postgres -tc "SELECT 1 FROM pg_database WHERE datname='aegra'" | grep -q 1 \
@@ -128,7 +128,7 @@ local:
 		.venv/bin/aegra dev --port 5002 --no-db-check
 
 local-down:
-	@export PODMAN_COMPOSE_SILENT=true && podman-compose -f compose.yaml stop pgvector redis
+	@export PODMAN_COMPOSE_SILENT=true && podman-compose -f compose.yaml stop pgvector redis eval-runner
 
 headless: ## Start agent in headless mode (background worker with event triggers)
 	@echo "Setting up headless environment..."
