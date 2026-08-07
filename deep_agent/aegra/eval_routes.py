@@ -636,7 +636,7 @@ async def _fire_eval_run(
                 log.info("eval_runner_called status=%s", resp.status_code)
     except Exception as exc:
         msg = f"Could not reach eval runner at {_EVAL_RUNNER_URL}: {exc}"
-        log.warning(msg)
+        log.warning("eval_runner_call_failed: %s", msg)
         await _mark_eval_error(config_hash, msg, row_created_at)
 
 

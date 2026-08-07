@@ -150,17 +150,19 @@ jobs:
         run: |
           if [ ! -f eval-info/last-good-eval.json ]; then
             echo "::warning::No eval artifact found — eval info will be empty"
-            echo "image="          >> $GITHUB_OUTPUT
-            echo "digest="         >> $GITHUB_OUTPUT
-            echo "sha="            >> $GITHUB_OUTPUT
+            echo "image="           >> $GITHUB_OUTPUT
+            echo "digest="          >> $GITHUB_OUTPUT
+            echo "sha="             >> $GITHUB_OUTPUT
+            echo "signed=false"     >> $GITHUB_OUTPUT
             echo "is_current=false" >> $GITHUB_OUTPUT
             exit 0
           fi
           cat eval-info/last-good-eval.json
-          echo "image=$(jq -r '.container_image' eval-info/last-good-eval.json)"   >> $GITHUB_OUTPUT
-          echo "digest=$(jq -r '.container_digest' eval-info/last-good-eval.json)"  >> $GITHUB_OUTPUT
-          echo "sha=$(jq -r '.git_sha' eval-info/last-good-eval.json)"              >> $GITHUB_OUTPUT
-          echo "is_current=${{ steps.eval-run.outputs.is_current }}"                >> $GITHUB_OUTPUT
+          echo "image=$(jq -r '.container_image' eval-info/last-good-eval.json)"    >> $GITHUB_OUTPUT
+          echo "digest=$(jq -r '.container_digest' eval-info/last-good-eval.json)"   >> $GITHUB_OUTPUT
+          echo "sha=$(jq -r '.git_sha' eval-info/last-good-eval.json)"               >> $GITHUB_OUTPUT
+          echo "signed=$(jq -r '.signed // false' eval-info/last-good-eval.json)"    >> $GITHUB_OUTPUT
+          echo "is_current=${{ steps.eval-run.outputs.is_current }}"                 >> $GITHUB_OUTPUT
 
       - name: Re-tag eval image with release version (tags only)
         if: steps.ctx.outputs.is_tag == 'true' && steps.eval.outputs.image != ''
@@ -197,15 +199,6 @@ jobs:
           EOF
           cat deployment/release-info.json
 
-      - name: Download eval deployment package artifact
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: eval-runner-deployment.zip
-          run-id: ${{ steps.eval-run.outputs.run_id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: eval-artifacts
-
       - name: Create deployment packages
         id: packages
         run: |
@@ -217,18 +210,13 @@ jobs:
           EVAL_IMAGE=""
           EVAL_DIGEST=""
 
-          if [ -f eval-artifacts/eval-runner-deployment.zip ] && [ -f eval-info/last-good-eval.json ]; then
-            cp eval-artifacts/eval-runner-deployment.zip .
+          if [ -f eval-info/last-good-eval.json ]; then
             EVAL_IMAGE=$(jq -r '.container_image' eval-info/last-good-eval.json)
             EVAL_DIGEST=$(jq -r '.container_digest' eval-info/last-good-eval.json)
             HAS_EVAL="true"
           fi
 
-          if [ "$HAS_EVAL" = "true" ]; then
-            sha256sum deployment.zip eval-runner-deployment.zip > SHA256SUMS.txt
-          else
-            sha256sum deployment.zip > SHA256SUMS.txt
-          fi
+          sha256sum deployment.zip > SHA256SUMS.txt
           cat SHA256SUMS.txt
           echo "has_eval=${HAS_EVAL}"         >> $GITHUB_OUTPUT
           echo "eval_image=${EVAL_IMAGE}"     >> $GITHUB_OUTPUT
@@ -241,7 +229,6 @@ jobs:
           name: release-package-${{ steps.ctx.outputs.version }}
           path: |
             deployment.zip
-            eval-runner-deployment.zip
             SHA256SUMS.txt
           retention-days: 30
 
@@ -271,21 +258,20 @@ jobs:
 
             | File | Description |
             |------|-------------|
-            | `deployment.zip` | Agent deployment manifests + release-info.json |
+            | `deployment.zip` | Agent + eval runner deployment manifests + release-info.json |
             | `SHA256SUMS.txt` | SHA-256 checksums |
           draft: false
           prerelease: ${{ contains(steps.ctx.outputs.version, 'alpha') || contains(steps.ctx.outputs.version, 'beta') || contains(steps.ctx.outputs.version, 'rc') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create GitHub Release with eval zip (tags only)
+      - name: Create GitHub Release with eval image (tags only)
         if: steps.ctx.outputs.is_tag == 'true' && steps.packages.outputs.has_eval == 'true'
         uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
         with:
           tag_name: ${{ steps.ctx.outputs.version }}
           files: |
             deployment.zip
-            eval-runner-deployment.zip
             SHA256SUMS.txt
           body: |
             ## Agent Image
@@ -300,18 +286,18 @@ jobs:
             ## Eval Runner Image${{ steps.eval.outputs.is_current != 'true' && ' ⚠️ previous successful build' || '' }}
 
             ```bash
-            docker pull ${{ steps.packages.outputs.eval_image }}
+            docker pull ghcr.io/${{ github.repository }}-eval:${{ steps.ctx.outputs.version }}
             ```
 
-            **Digest:** `${{ steps.packages.outputs.eval_digest }}`
+            **Digest:** `${{ steps.eval.outputs.digest }}`
+            **Signed:** ${{ steps.eval.outputs.signed == 'true' && 'Yes' || 'No' }}
             ${{ steps.eval.outputs.is_current != 'true' && format('> Built from commit `{0}` — eval build failed or timed out on this release commit.', steps.eval.outputs.sha) || '> Built from this release commit.' }}
 
             ## Artifacts
 
             | File | Description |
             |------|-------------|
-            | `deployment.zip` | Agent deployment manifests + combined release-info.json |
-            | `eval-runner-deployment.zip` | Eval runner deployment manifests |
+            | `deployment.zip` | Agent + eval runner deployment manifests + release-info.json |
             | `SHA256SUMS.txt` | SHA-256 checksums |
           draft: false
           prerelease: ${{ contains(steps.ctx.outputs.version, 'alpha') || contains(steps.ctx.outputs.version, 'beta') || contains(steps.ctx.outputs.version, 'rc') }}
