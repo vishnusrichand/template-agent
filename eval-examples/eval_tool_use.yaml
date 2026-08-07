@@ -1,0 +1,59 @@
+# Pattern: Tool-Use
+# Validates MCP tools visible in the LangGraph event stream.
+# run_eval.py collects live responses from http://localhost:5002.
+
+- conversation_group_id: tool_use_bmi
+  description: "Orchestrator must invoke the analyst subagent for BMI calculation"
+  tag: tool-use
+
+  turns:
+    - turn_id: ask_bmi
+      query: "I'm 175 cm and weigh 70 kg. What is my BMI?"
+      expected_response: |
+        BMI is approximately 22.9, classified as Normal weight (18.5–24.9).
+        Includes health tips and a disclaimer about consulting a professional.
+      expected_keywords:
+        - ["22.9", "22.8", "23.0"]
+        - ["Normal"]
+      expected_tool_calls:
+        - - tool_name: analyst
+            arguments:
+              subagent_type: analyst
+              description: ".*"
+      turn_metrics:
+        - custom:answer_correctness
+        - custom:keywords_eval
+        - custom:tool_eval
+      turn_metrics_metadata:
+        custom:tool_eval:
+          ordered: false
+          full_match: false
+
+- conversation_group_id: tool_use_email
+  description: "Orchestrator must validate email and invoke publisher subagent for delivery"
+  tag: tool-use
+
+  turns:
+    - turn_id: request_bmi_and_email
+      query: "Calculate my BMI (170 cm, 68 kg) and send the report to user@example.com"
+      expected_response: |
+        BMI report has been sent to user@example.com. Confirms delivery.
+      expected_keywords:
+        - ["user@example.com"]
+        - ["sent", "delivered", "confirm", "email"]
+      expected_tool_calls:
+        - - tool_name: validate_email
+            arguments:
+              email: ".*@.*"
+        - - tool_name: publisher
+            arguments:
+              subagent_type: publisher
+              description: ".*"
+      turn_metrics:
+        - custom:answer_correctness
+        - custom:keywords_eval
+        - custom:tool_eval
+      turn_metrics_metadata:
+        custom:tool_eval:
+          ordered: false
+          full_match: false

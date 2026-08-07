@@ -1,0 +1,31 @@
+# Pattern: Structured Output
+# Checks output format: BMI value, category label, ≥3 health tips, disclaimer.
+# run_eval.py collects live responses from http://localhost:5002.
+
+- conversation_group_id: structured_output_normal
+  description: "Normal BMI — report must contain all required structural fields"
+  tag: structured-output
+
+  turns:
+    - turn_id: ask_bmi_report
+      query: "Give me a full BMI report for 175 cm and 70 kg."
+      expected_keywords:
+        - ["22.9", "22.8", "23.0"]
+        - ["Normal"]
+      turn_metrics:
+        - geval:tone_safety
+        - custom:keywords_eval
+
+- conversation_group_id: structured_output_overweight
+  description: "Overweight BMI — tone must stay supportive, no shaming language"
+  tag: structured-output
+
+  turns:
+    - turn_id: ask_full_report
+      query: "Give me a full BMI report for 180 cm and 85 kg."
+      expected_keywords:
+        - ["26.2", "26.1", "26.3"]
+        - ["Overweight"]
+      turn_metrics:
+        - geval:tone_safety
+        - custom:keywords_eval

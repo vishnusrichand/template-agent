@@ -20,8 +20,9 @@ repos:
     hooks:
       - id: ruff
         args: [--fix]
-        exclude: ^tests/
+        exclude: ^(tests/|eval-runner/tests/)
       - id: ruff-format
+        exclude: ^(tests/|eval-runner/tests/)
 
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.16.1
@@ -29,7 +30,7 @@ repos:
       - id: mypy
         args: [--ignore-missing-imports]
         additional_dependencies: [types-requests, types-PyYAML, types-cachetools]
-        exclude: ^tests/
+        exclude: ^(tests/|eval-runner/tests/)
 
 
   - repo: https://github.com/PyCQA/pydocstyle
@@ -37,11 +38,11 @@ repos:
     hooks:
       - id: pydocstyle
         args: [--convention=google]
-        exclude: ^tests/
+        exclude: ^(tests/|eval-runner/tests/)
 
   - repo: https://github.com/PyCQA/bandit
     rev: 1.8.6
     hooks:
       - id: bandit
         args: [ "-lll" ] # only report high severity
-        exclude: ^tests/
+        exclude: ^(tests/|eval-runner/tests/)

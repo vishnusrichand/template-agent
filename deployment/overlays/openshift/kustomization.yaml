@@ -12,10 +12,14 @@ resources:
   - route.yaml
   - pdb.yaml
   - hpa.yaml
+  - eval-runner-buildconfig.yaml
+  - eval-runner-imagestream.yaml
+  - eval-runner-scaledobject.yaml
 
 components:
   - ../../components/postgres
   - ../../components/redis
+  - ../../components/eval-runner
 
 labels:
   - pairs:
@@ -25,10 +29,13 @@ labels:
 images:
   - name: agent
     newTag: latest
+  - name: eval-runner
+    newTag: latest
 
 patches:
   - path: configmap-patch.yaml
   - path: secret-patch.yaml
+  - path: eval-runner-deployment-patch.yaml
 
   # Agent deployment patches
   - target:

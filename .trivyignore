@@ -1,3 +1,16 @@
+# GHSA-6v7p-g79w-8964: msgpack out-of-bounds read (HIGH)
+# pip 26.2 vendors msgpack 1.1.2 internally in pip/_vendor/msgpack.
+# This copy is used only by pip for package metadata parsing — not exposed to
+# the application. The app itself installs msgpack>=1.2.1. Not exploitable via pip.
+# Remove when pip upgrades its vendored msgpack to 1.2.1+.
+GHSA-6v7p-g79w-8964
+
+# CVE-2025-47273: setuptools path traversal (HIGH)
+# pip 26.2 vendors setuptools 70.3.0 internally. This vendored copy is only used
+# by pip's build backend — not exposed to the application. Not exploitable in context.
+# Remove when pip upgrades its vendored setuptools to 78.1.1+.
+CVE-2025-47273
+
 # CVE-2026-31072: APScheduler RCE via insecure deserialization (CRITICAL)
 # No fixed version available as of 2026-07-07.
 # Risk mitigated: AsyncScheduler is used with in-memory store only (no persistent

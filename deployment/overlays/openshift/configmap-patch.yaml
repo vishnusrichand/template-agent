@@ -24,3 +24,7 @@ data:
 
   # Redis
   REDIS_URL: "redis://redis:6379/0"
+
+  # Eval runner — internal ClusterIP service, same namespace
+  # Agent calls eval runner directly after trigger (no UI involvement)
+  EVAL_RUNNER_URL: "http://eval-runner:8099"

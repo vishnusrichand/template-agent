@@ -213,6 +213,30 @@ jobs:
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
 
+      - name: Record last-good-agent build
+        if: github.event_name != 'pull_request'
+        run: |
+          cat > /tmp/last-good-agent.json <<EOF
+          {
+            "container_image": "ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}",
+            "container_digest": "${{ steps.push.outputs.digest }}",
+            "git_sha": "${{ github.sha }}",
+            "git_ref": "${{ github.ref }}",
+            "version": "${{ steps.version.outputs.version }}",
+            "signed": ${{ steps.sign.outputs.signed || false }},
+            "build_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+          cat /tmp/last-good-agent.json
+
+      - name: Upload last-good-agent artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: last-good-agent
+          path: /tmp/last-good-agent.json
+          retention-days: 90
+
       - name: Create deployment package metadata
         if: github.event_name != 'pull_request'
         run: |

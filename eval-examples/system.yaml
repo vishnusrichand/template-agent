@@ -1,0 +1,200 @@
+# lightspeed-evaluation system config for the template agent
+# Judge LLM: Vertex AI Gemini via service account credentials
+#
+# Required env vars:
+#   GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+#   GOOGLE_CLOUD_PROJECT=data-and-ai-gemini
+#   VERTEX_LOCATION=us-east4
+
+core:
+  max_threads: 5
+  fail_on_invalid_data: false
+  skip_on_failure: true
+  cache_enabled: true
+  cache_base_dir: .caches
+
+llm:
+  provider: vertex
+  model: vertex_ai/gemini-2.5-pro
+
+llm_pool:
+  defaults:
+    timeout: 300
+    num_retries: 3
+    parameters:
+      temperature: 0.0
+      max_completion_tokens: 1024
+  models:
+    judge_gemini:
+      provider: vertex
+      model: vertex_ai/gemini-2.5-pro
+
+judge_panel:
+  judges:
+    - judge_gemini
+  aggregation_strategy: max
+
+agents:
+  enabled: false   # run_eval.py pre-populates responses; framework scores pre-filled data
+  default:
+    agent: deepagent
+    agent_config:
+      timeout: 120
+      num_retries: 2
+  deepagent:
+    type: http_api
+    api_base: "http://localhost:5002"
+    version: v1
+    endpoint_type: streaming
+    timeout: 120
+
+metrics_metadata:
+  turn_level:
+    "custom:answer_correctness":
+      threshold: 0.75
+      description: "Correctness of the response vs expected answer"
+      default: true
+
+    "custom:intent_eval":
+      threshold: 1
+      description: "Agent understood the user's intent correctly"
+      default: true
+
+    "custom:keywords_eval":
+      description: "Required keywords present in response"
+
+    "custom:tool_eval":
+      description: "Tool calls match expected calls"
+      ordered: false
+      full_match: true
+
+    "geval:delegation_compliance":
+      criteria: |
+        Assess whether the orchestrator agent correctly delegates work
+        to subagents instead of performing calculations, analysis, or
+        email formatting itself. The orchestrator should never compute
+        BMI values, determine health categories, or generate email HTML.
+      evaluation_params:
+        - query
+        - response
+      evaluation_steps:
+        - "Check if BMI calculation is performed by a subagent (analyst), not the orchestrator"
+        - "Verify health tips come from subagent output, not inline generation"
+        - "If email is requested, confirm publisher subagent handles formatting"
+        - "Check that the orchestrator only coordinates, greets, and relays results"
+      threshold: 0.8
+      description: "Orchestrator delegates correctly — never does analyst/publisher work itself"
+
+    "geval:tone_safety":
+      criteria: |
+        Evaluate whether the response maintains a supportive, encouraging,
+        and non-judgmental tone when discussing health metrics. The agent
+        must never use shaming language or make the user feel bad about
+        their BMI category.
+      evaluation_params:
+        - query
+        - response
+      evaluation_steps:
+        - "Check for absence of negative words like 'bad', 'failing', 'terrible', 'fat'"
+        - "Verify health tips are framed positively (what to do, not what's wrong)"
+        - "Confirm disclaimer is present and appropriately worded"
+        - "Assess overall supportive and professional tone"
+      threshold: 0.9
+      description: "Response tone is supportive, non-judgmental, and professional"
+
+    "geval:structured_output_compliance":
+      criteria: |
+        Assess whether the BMI report response contains all required structured fields:
+        a numeric BMI value, a BMI category label (Underweight/Normal/Overweight/Obese),
+        at least 3 actionable health tips, and a disclaimer advising professional
+        consultation.
+      evaluation_params:
+        - response
+      evaluation_steps:
+        - "Check for a numeric BMI value in the response"
+        - "Check for a BMI category label (Underweight/Normal/Overweight/Obese)"
+        - "Count health tips — must be 3 or more"
+        - "Verify presence of disclaimer text recommending professional consultation"
+      threshold: 0.85
+      description: "BMI report contains all required structured output fields"
+
+  conversation_level:
+    "deepeval:conversation_completeness":
+      threshold: 0.7
+      description: "Conversation addresses all user intentions"
+
+    "deepeval:conversation_relevancy":
+      threshold: 0.7
+      description: "Conversation stays relevant to fitness assessment scope"
+
+storage:
+  - type: "file"
+    output_dir: "./eval_output_live"
+    base_filename: "deep_agent_live_eval"
+    enabled_outputs:
+      - csv
+      - json
+      - txt
+    csv_columns:
+      - "conversation_group_id"
+      - "turn_id"
+      - "metric_identifier"
+      - "metric_metadata"
+      - "result"
+      - "score"
+      - "threshold"
+      - "reason"
+      - "execution_time"
+      - "evaluation_latency"
+      - "query"
+      - "response"
+      - "api_input_tokens"
+      - "api_output_tokens"
+      - "agent_latency"
+      - "time_to_first_token"
+      - "streaming_duration"
+      - "tokens_per_second"
+      - "judge_llm_input_tokens"
+      - "judge_llm_output_tokens"
+      - "embedding_tokens"
+      - "judge_scores"
+      - "tool_calls"
+      - "contexts"
+      - "expected_response"
+      - "expected_intent"
+      - "expected_keywords"
+      - "expected_tool_calls"
+    summary_config_sections:
+      - core
+      - llm_pool
+      - judge_panel
+      - agents
+
+visualization:
+  figsize: [12, 8]
+  dpi: 300
+  enabled_graphs:
+    - "pass_rates"
+    - "score_distribution"
+    - "conversation_heatmap"
+    - "status_breakdown"
+
+environment:
+  DEEPEVAL_TELEMETRY_OPT_OUT: "YES"
+  DEEPEVAL_DISABLE_PROGRESS_BAR: "YES"
+  LITELLM_LOG: ERROR
+  VERTEX_PROJECT: data-and-ai-gemini
+  VERTEX_LOCATION: us-east4
+
+logging:
+  source_level: INFO
+  package_level: ERROR
+  log_format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  show_timestamps: true
+  package_overrides:
+    httpx: ERROR
+    urllib3: ERROR
+    matplotlib: ERROR
+    LiteLLM: WARNING
+    DeepEval: WARNING
+    ragas: WARNING

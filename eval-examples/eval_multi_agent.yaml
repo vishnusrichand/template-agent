@@ -1,0 +1,63 @@
+# Pattern: Multi-Agent Chain
+# Orchestrator → Analyst (BMI) → Publisher (email) full delegation chain.
+# run_eval.py collects live responses from http://localhost:5002.
+
+- conversation_group_id: multi_agent_bmi_only
+  description: "Orchestrator → Analyst: delegates calculation, relays result"
+  tag: multi-agent
+
+  turns:
+    - turn_id: bmi_via_chain
+      query: "What is the BMI for someone 172 cm tall and 65 kg?"
+      expected_response: |
+        BMI is approximately 22.0, classified as Normal weight.
+        Calculation was performed by the analyst subagent.
+      expected_keywords:
+        - ["22.0", "21.9", "22.1"]
+        - ["Normal"]
+      expected_tool_calls:
+        - - tool_name: analyst
+            arguments:
+              subagent_type: analyst
+              description: ".*"
+      turn_metrics:
+        - custom:answer_correctness
+        - custom:keywords_eval
+        - custom:tool_eval
+      turn_metrics_metadata:
+        custom:tool_eval:
+          ordered: false
+          full_match: false
+
+- conversation_group_id: multi_agent_full_chain
+  description: "Orchestrator → Analyst (BMI) → Publisher (email) end-to-end"
+  tag: multi-agent
+
+  conversation_metrics:
+    - deepeval:conversation_completeness
+    - deepeval:conversation_relevancy
+
+  turns:
+    - turn_id: full_chain_request
+      query: "Calculate BMI for 175 cm / 70 kg and email the full report to report@example.com"
+      expected_response: |
+        Orchestrator delegates BMI calculation to the analyst subagent.
+        Delegates email formatting and delivery to the publisher subagent.
+        Confirms email sent to report@example.com.
+      expected_keywords:
+        - ["report@example.com"]
+        - ["22.9", "22.8", "23.0"]
+        - ["Normal"]
+      expected_tool_calls:
+        - - tool_name: analyst
+            arguments:
+              subagent_type: analyst
+              description: ".*"
+      turn_metrics:
+        - custom:answer_correctness
+        - custom:keywords_eval
+        - custom:tool_eval
+      turn_metrics_metadata:
+        custom:tool_eval:
+          ordered: false
+          full_match: false
