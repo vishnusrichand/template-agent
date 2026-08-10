@@ -818,9 +818,22 @@ _EVAL_STALE_TIMEOUT_MINUTES = int(os.environ.get("EVAL_STALE_TIMEOUT_MINUTES", "
 async def eval_status() -> dict[str, Any]:
     """Return the latest eval record for this agent.
 
+    Returns {"eval_status": "no_dataset"} immediately when no dataset is
+    configured, without creating or querying the evals table.
+
     Auto-expires in_progress rows older than EVAL_STALE_TIMEOUT_MINUTES (default 30)
     so a crashed eval run does not leave the UI stuck in Evaluating forever.
     """
+    has_pg = await _has_postgres_dataset()
+    if not has_pg:
+        config_dir = os.environ.get("CONFIG_PATH", "config/agent")
+        eval_cases = Path(f"{config_dir}/evals/lightspeed-agent/eval_cases.yaml")
+        if not eval_cases.exists():
+            return {
+                "eval_status": "no_dataset",
+                "message": "No eval dataset configured. Add test cases via the Dataset UI before running evaluation.",
+            }
+
     await _ensure_evals_table_once()
     async with await _pg_conn() as conn:
         await conn.execute(
