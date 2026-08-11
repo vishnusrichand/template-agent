@@ -14,9 +14,11 @@ RUN pip install --no-cache-dir \
     pyyaml \
     psycopg2-binary
 
-USER 65532
-
 COPY src/ ./
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+USER 65532
 
 # /evals  — mounted from PVC: system.yaml + eval_*.yaml (agent-engine writes these)
 # /eval_output — mount a volume here for result persistence
@@ -24,4 +26,4 @@ VOLUME ["/evals", "/eval_output"]
 
 EXPOSE 8099
 
-ENTRYPOINT ["uvicorn", "eval_api:app", "--host", "0.0.0.0", "--port", "8099"]
+ENTRYPOINT ["/app/entrypoint.sh", "uvicorn", "eval_api:app", "--host", "0.0.0.0", "--port", "8099"]
