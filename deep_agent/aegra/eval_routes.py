@@ -669,12 +669,13 @@ async def _ensure_datasets_table_once() -> None:
 
 
 async def _has_postgres_dataset() -> bool:
-    """Return True if eval_datasets has a row for this org+name."""
+    """Return True if eval_datasets has a row with at least one case for this org+name."""
     try:
         await _ensure_datasets_table_once()
         async with await _pg_conn() as conn:
             row = await conn.execute(
-                "SELECT 1 FROM eval_datasets WHERE org=%s AND name=%s LIMIT 1",
+                "SELECT 1 FROM eval_datasets WHERE org=%s AND name=%s "
+                "AND jsonb_array_length(dataset->'cases') > 0 LIMIT 1",
                 (_AGENT_ORG, _AGENT_NAME),
             )
             return await row.fetchone() is not None

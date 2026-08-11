@@ -7,7 +7,13 @@ on:
     branches:
       # - main
       - deep-agent
-  workflow_dispatch:  # Allow manual trigger for testing
+      - feat/agent_evaluation_lightspeed
+  pull_request:
+    branches: [ deep-agent, feat/agent_evaluation_lightspeed ]
+    paths:
+      - 'eval-runner/**'
+      - 'eval-runner/Containerfile'
+  workflow_dispatch:
 
 permissions:
   contents: write
