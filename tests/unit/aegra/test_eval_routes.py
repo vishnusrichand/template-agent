@@ -603,8 +603,9 @@ class TestTriggerEval:
 
         mock_request = MagicMock()
         with patch.dict("os.environ", {"CONFIG_PATH": str(tmp_path)}):
-            with pytest.raises(HTTPException) as exc:
-                await er.trigger_eval(mock_request)
+            with patch("deep_agent.aegra.eval_routes._has_postgres_dataset", AsyncMock(return_value=False)):
+                with pytest.raises(HTTPException) as exc:
+                    await er.trigger_eval(mock_request)
         assert exc.value.status_code == 400
 
     async def test_returns_cached_when_exists(self, tmp_path):
@@ -711,8 +712,9 @@ class TestForceTriggerEval:
 
         mock_request = MagicMock()
         with patch.dict("os.environ", {"CONFIG_PATH": str(tmp_path)}):
-            with pytest.raises(HTTPException) as exc:
-                await er.force_trigger_eval(mock_request)
+            with patch("deep_agent.aegra.eval_routes._has_postgres_dataset", AsyncMock(return_value=False)):
+                with pytest.raises(HTTPException) as exc:
+                    await er.force_trigger_eval(mock_request)
         assert exc.value.status_code == 400
 
     async def test_force_queues_new_run(self, tmp_path):
