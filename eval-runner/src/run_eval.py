@@ -608,10 +608,9 @@ def _fetch_subagent_tool_calls(  # pragma: no cover
             time.sleep(retry_delay * (attempt + 1))
     if last_exc:
         log.warning(
-            "subagent_tool_calls_fetch_failed after %d attempts (%s): %s",
+            "subagent_tool_calls_fetch_failed after %d attempts (%s)",
             retries,
             type(last_exc).__name__,
-            last_exc,
         )
     return []
 
@@ -645,11 +644,10 @@ def _populate_group(  # pragma: no cover
             result = _call_agent(agent_url, query, thread_id, auth_token, timeout)
         except Exception as exc:
             log.error(
-                "[%s] turn=%s agent_call_failed (%s): %s",
+                "[%s] turn=%s agent_call_failed (%s)",
                 group_id,
                 turn_id,
                 type(exc).__name__,
-                exc,
             )
             result = {
                 "response": _AGENT_ERROR_RESPONSE,
@@ -737,7 +735,7 @@ def _populate_dataset(  # pragma: no cover
             try:
                 results[idx] = future.result()
             except Exception as exc:
-                log.error("group[%d] unhandled (%s): %s", idx, type(exc).__name__, exc)
+                log.error("group[%d] unhandled (%s)", idx, type(exc).__name__)
                 results[idx] = groups[idx]
 
     return [results[i] for i in range(len(groups))]
@@ -822,73 +820,6 @@ def _run_lightspeed(
     finally:
         for p in tmp_files:
             p.unlink(missing_ok=True)
-
-
-# ── Summary ──────────────────────────────────────────────────────────────────
-
-
-def _log_one_summary(summary: dict[str, Any]) -> None:
-    stats_block = summary.get("summary_stats", summary)
-    overall = stats_block.get("overall", {})
-    if overall:
-        total = overall.get("TOTAL", overall.get("total", "?"))
-        passed = overall.get("PASS", overall.get("passed", "?"))
-        rate = overall.get("pass_rate", 0)
-        log.info("overall: %s/%s passed (%.0f%%)", passed, total, rate)
-
-    thresholds: dict[str, float | None] = {}
-    for r in summary.get("results", []):
-        metric = r.get("metric_identifier", "")
-        if metric and metric not in thresholds:
-            thresholds[metric] = r.get("threshold")
-
-    per_metric = stats_block.get("by_metric", summary.get("per_metric", {}))
-    for metric, mstats in per_metric.items():
-        rate = mstats.get("pass_rate", 0)
-        passed = mstats.get("pass", mstats.get("passed", "?"))
-        total = (mstats.get("pass", 0) + mstats.get("fail", 0)) or mstats.get(
-            "total", "?"
-        )
-        threshold = thresholds.get(metric)
-        passed_threshold = threshold is None or (
-            isinstance(rate, (int, float)) and rate / 100 >= threshold
-        )
-        log.debug(
-            "metric %-48s %s/%s (%.0f%%)%s",
-            metric,
-            passed,
-            total,
-            rate,
-            f" threshold={threshold}" if threshold is not None else "",
-        ) if passed_threshold else log.warning(
-            "metric %-48s %s/%s (%.0f%%) BELOW threshold=%s",
-            metric,
-            passed,
-            total,
-            rate,
-            threshold,
-        )
-
-
-def _log_summary(output_dir: Path) -> None:
-    candidates = list(output_dir.glob("*_summary.json"))
-    if not candidates:
-        log.info("report written to %s", output_dir.resolve())
-        return
-    if len(candidates) > 1:
-        log.info("logging summary for %d files in %s", len(candidates), output_dir)
-    for candidate in candidates:
-        try:
-            summary = json.loads(candidate.read_text())
-        except Exception:
-            log.warning(
-                "failed to parse summary %s — raw output in %s",
-                candidate.name,
-                output_dir.resolve(),
-            )
-            continue
-        _log_one_summary(summary)
-    log.info("full report: %s", output_dir.resolve())
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -988,8 +919,6 @@ def main() -> None:
         )
     finally:
         tmp_path.unlink(missing_ok=True)
-
-    _log_summary(args.output_dir)
 
     if exit_code != 0:
         log.error("eval FAILED — lightspeed-eval exited %d", exit_code)

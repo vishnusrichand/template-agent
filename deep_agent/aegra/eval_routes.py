@@ -835,24 +835,39 @@ async def eval_status() -> dict[str, Any]:
             }
 
     await _ensure_evals_table_once()
-    async with await _pg_conn() as conn:
-        await conn.execute(
-            "UPDATE evals SET eval_status='error', completed_at=NOW(), updated_at=NOW() "
-            "WHERE org=%s AND name=%s AND eval_status='in_progress' "
-            "AND created_at < NOW() - make_interval(mins => %s)",
-            (_AGENT_ORG, _AGENT_NAME, _EVAL_STALE_TIMEOUT_MINUTES),
-        )
-        row = await conn.execute(
-            "SELECT * FROM evals WHERE org=%s AND name=%s "
-            "ORDER BY created_at DESC LIMIT 1",
-            (_AGENT_ORG, _AGENT_NAME),
-        )
-        result = await row.fetchone()
-        if not result:
-            return {"eval_status": "not_started", "message": "no eval runs yet"}
-        doc = _pg_row_to_dict(result, row)
-        doc.pop("id", None)
-        return doc
+    try:
+        async with await _pg_conn() as conn:
+            await conn.execute(
+                "UPDATE evals SET eval_status='error', completed_at=NOW(), updated_at=NOW() "
+                "WHERE org=%s AND name=%s AND eval_status='in_progress' "
+                "AND created_at < NOW() - make_interval(mins => %s)",
+                (_AGENT_ORG, _AGENT_NAME, _EVAL_STALE_TIMEOUT_MINUTES),
+            )
+            row = await conn.execute(
+                "SELECT * FROM evals WHERE org=%s AND name=%s "
+                "ORDER BY created_at DESC LIMIT 1",
+                (_AGENT_ORG, _AGENT_NAME),
+            )
+            result = await row.fetchone()
+            if not result:
+                return {"eval_status": "not_started", "message": "no eval runs yet"}
+            doc = _pg_row_to_dict(result, row)
+            doc.pop("id", None)
+            return doc
+    except Exception as exc:
+        import psycopg
+
+        if isinstance(exc, psycopg.errors.UndefinedTable):
+            global _table_ensured
+            _table_ensured = False
+            log.warning(
+                "evals table does not exist yet — no eval results available: %s", exc
+            )
+            return {
+                "eval_status": "no_dataset",
+                "message": "No eval results exist yet. Run an evaluation first.",
+            }
+        raise
 
 
 @eval_mgmt_router.get("/results")
@@ -866,27 +881,41 @@ async def eval_results(request: Request) -> dict[str, Any]:
 
     completed_at = request.query_params.get("completed_at")
     await _ensure_evals_table_once()
-    async with await _pg_conn() as conn:
-        if completed_at:
-            row = await conn.execute(
-                "SELECT * FROM evals WHERE org=%s AND name=%s "
-                "AND eval_status='completed' AND completed_at=%s "
-                "LIMIT 1",
-                (_AGENT_ORG, _AGENT_NAME, completed_at),
+    try:
+        async with await _pg_conn() as conn:
+            if completed_at:
+                row = await conn.execute(
+                    "SELECT * FROM evals WHERE org=%s AND name=%s "
+                    "AND eval_status='completed' AND completed_at=%s "
+                    "LIMIT 1",
+                    (_AGENT_ORG, _AGENT_NAME, completed_at),
+                )
+            else:
+                row = await conn.execute(
+                    "SELECT * FROM evals WHERE org=%s AND name=%s "
+                    "AND eval_status='completed' "
+                    "ORDER BY completed_at DESC LIMIT 1",
+                    (_AGENT_ORG, _AGENT_NAME),
+                )
+            result = await row.fetchone()
+            if not result:
+                raise HTTPException(status_code=404, detail="no completed eval results")
+            doc = _pg_row_to_dict(result, row)
+            doc.pop("id", None)
+            return doc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        import psycopg
+
+        if isinstance(exc, psycopg.errors.UndefinedTable):
+            global _table_ensured
+            _table_ensured = False
+            log.warning(
+                "evals table does not exist yet — no eval results available: %s", exc
             )
-        else:
-            row = await conn.execute(
-                "SELECT * FROM evals WHERE org=%s AND name=%s "
-                "AND eval_status='completed' "
-                "ORDER BY completed_at DESC LIMIT 1",
-                (_AGENT_ORG, _AGENT_NAME),
-            )
-        result = await row.fetchone()
-        if not result:
             raise HTTPException(status_code=404, detail="no completed eval results")
-        doc = _pg_row_to_dict(result, row)
-        doc.pop("id", None)
-        return doc
+        raise
 
 
 @eval_mgmt_router.get("/history")
@@ -895,26 +924,42 @@ async def eval_history(request: Request) -> dict[str, Any]:
     limit = min(int(request.query_params.get("limit", "20")), 100)
     await _ensure_evals_table_once()
 
-    async with await _pg_conn() as conn:
-        cur = await conn.execute(
-            "SELECT eval_score, pass, fail, error, config_hash, "
-            "       created_at, completed_at, "
-            "       COUNT(*) OVER() AS total_count "
-            "FROM evals "
-            "WHERE org=%s AND name=%s AND eval_status='completed' "
-            "ORDER BY completed_at DESC LIMIT %s",
-            (_AGENT_ORG, _AGENT_NAME, limit),
-        )
-        cols = [d.name for d in cur.description]
-        runs = []
-        total = 0
-        async for row in cur:
-            d = dict(zip(cols, row))
-            total = d.pop("total_count", 0)
-            for k in ("created_at", "completed_at"):
-                if d.get(k) is not None:
-                    d[k] = d[k].isoformat() if hasattr(d[k], "isoformat") else str(d[k])
-            runs.append(d)
+    try:
+        async with await _pg_conn() as conn:
+            cur = await conn.execute(
+                "SELECT eval_score, pass, fail, error, config_hash, "
+                "       created_at, completed_at, "
+                "       COUNT(*) OVER() AS total_count "
+                "FROM evals "
+                "WHERE org=%s AND name=%s AND eval_status='completed' "
+                "ORDER BY completed_at DESC LIMIT %s",
+                (_AGENT_ORG, _AGENT_NAME, limit),
+            )
+            cols = [d.name for d in cur.description]
+            runs = []
+            total = 0
+            async for row in cur:
+                d = dict(zip(cols, row))
+                total = d.pop("total_count", 0)
+                for k in ("created_at", "completed_at"):
+                    if d.get(k) is not None:
+                        d[k] = (
+                            d[k].isoformat()
+                            if hasattr(d[k], "isoformat")
+                            else str(d[k])
+                        )
+                runs.append(d)
+    except Exception as exc:
+        import psycopg
+
+        if isinstance(exc, psycopg.errors.UndefinedTable):
+            global _table_ensured
+            _table_ensured = False
+            log.warning(
+                "evals table does not exist yet — no eval history available: %s", exc
+            )
+            return {"runs": [], "total": 0}
+        raise
 
     return {"runs": runs, "total": total}
 
@@ -925,41 +970,53 @@ async def eval_trends(request: Request) -> dict[str, Any]:
     limit = min(int(request.query_params.get("limit", "20")), 100)
     await _ensure_evals_table_once()
 
-    async with await _pg_conn() as conn:
-        cur = await conn.execute(
-            "SELECT results_detail->'summary'->'summary_stats'->'by_metric' as by_metric, "
-            "       eval_score, completed_at "
-            "FROM evals "
-            "WHERE org=%s AND name=%s AND eval_status='completed' "
-            "  AND results_detail IS NOT NULL "
-            "ORDER BY completed_at DESC LIMIT %s",
-            (_AGENT_ORG, _AGENT_NAME, limit),
-        )
-
-        metrics: dict[str, list[dict]] = {}
-        overall: list[dict] = []
-
-        async for row in cur:
-            by_metric_raw, eval_score, completed_at = row
-            ts = (
-                completed_at.isoformat()
-                if hasattr(completed_at, "isoformat")
-                else str(completed_at)
+    try:
+        async with await _pg_conn() as conn:
+            cur = await conn.execute(
+                "SELECT results_detail->'summary'->'summary_stats'->'by_metric' as by_metric, "
+                "       eval_score, completed_at "
+                "FROM evals "
+                "WHERE org=%s AND name=%s AND eval_status='completed' "
+                "  AND results_detail IS NOT NULL "
+                "ORDER BY completed_at DESC LIMIT %s",
+                (_AGENT_ORG, _AGENT_NAME, limit),
             )
-            overall.append({"completed_at": ts, "eval_score": eval_score})
 
-            by_metric = by_metric_raw if isinstance(by_metric_raw, dict) else {}
-            for metric_name, stats in by_metric.items():
-                if metric_name not in metrics:
-                    metrics[metric_name] = []
-                metrics[metric_name].append(
-                    {
-                        "completed_at": ts,
-                        "pass_rate": stats.get("pass_rate")
-                        if isinstance(stats, dict)
-                        else None,
-                    }
+            metrics: dict[str, list[dict]] = {}
+            overall: list[dict] = []
+
+            async for row in cur:
+                by_metric_raw, eval_score, completed_at = row
+                ts = (
+                    completed_at.isoformat()
+                    if hasattr(completed_at, "isoformat")
+                    else str(completed_at)
                 )
+                overall.append({"completed_at": ts, "eval_score": eval_score})
+
+                by_metric = by_metric_raw if isinstance(by_metric_raw, dict) else {}
+                for metric_name, stats in by_metric.items():
+                    if metric_name not in metrics:
+                        metrics[metric_name] = []
+                    metrics[metric_name].append(
+                        {
+                            "completed_at": ts,
+                            "pass_rate": stats.get("pass_rate")
+                            if isinstance(stats, dict)
+                            else None,
+                        }
+                    )
+    except Exception as exc:
+        import psycopg
+
+        if isinstance(exc, psycopg.errors.UndefinedTable):
+            global _table_ensured
+            _table_ensured = False
+            log.warning(
+                "evals table does not exist yet — no eval trends available: %s", exc
+            )
+            return {"metrics": {}, "overall": []}
+        raise
 
     return {"metrics": metrics, "overall": overall}
 
