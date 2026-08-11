@@ -361,14 +361,22 @@ class TestAtomicSetInProgress:
 # ── eval_status endpoint ──────────────────────────────────────────────────────
 
 class TestEvalStatus:
+    async def test_returns_no_dataset_when_none_configured(self, tmp_path):
+        with patch("deep_agent.aegra.eval_routes._has_postgres_dataset", AsyncMock(return_value=False)):
+            with patch.dict("os.environ", {"CONFIG_PATH": str(tmp_path)}):
+                result = await er.eval_status()
+        assert result["eval_status"] == "no_dataset"
+        assert "dataset" in result["message"].lower()
+
     async def test_returns_not_started_when_no_rows(self):
         er._table_ensured = True
         cursor = _make_cursor(rows=[None])
         cursor.fetchone = AsyncMock(return_value=None)
         conn, _ = _make_conn(cursor)
 
-        with patch("deep_agent.aegra.eval_routes._pg_conn", AsyncMock(return_value=conn)):
-            result = await er.eval_status()
+        with patch("deep_agent.aegra.eval_routes._has_postgres_dataset", AsyncMock(return_value=True)):
+            with patch("deep_agent.aegra.eval_routes._pg_conn", AsyncMock(return_value=conn)):
+                result = await er.eval_status()
 
         assert result["eval_status"] == "not_started"
         er._table_ensured = False
@@ -382,8 +390,9 @@ class TestEvalStatus:
         # first execute is UPDATE (stale cleanup), second is SELECT
         conn.execute = AsyncMock(side_effect=[cursor, cursor])
 
-        with patch("deep_agent.aegra.eval_routes._pg_conn", AsyncMock(return_value=conn)):
-            result = await er.eval_status()
+        with patch("deep_agent.aegra.eval_routes._has_postgres_dataset", AsyncMock(return_value=True)):
+            with patch("deep_agent.aegra.eval_routes._pg_conn", AsyncMock(return_value=conn)):
+                result = await er.eval_status()
 
         assert result["eval_status"] == "completed"
         assert result["eval_score"] == 0.95

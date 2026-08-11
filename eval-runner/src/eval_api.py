@@ -728,7 +728,9 @@ async def get_run_results(run_id: str) -> JSONResponse:
             None, get_results_by_run_id, run_id
         )
     except Exception as exc:
-        log.error("get_run_results failed for run_id=%s: %s", run_id, exc)
+        log.error(
+            "get_run_results failed for run_id=%s (%s)", run_id, type(exc).__name__
+        )
         raise HTTPException(
             status_code=500, detail="Failed to retrieve eval results"
         ) from exc
