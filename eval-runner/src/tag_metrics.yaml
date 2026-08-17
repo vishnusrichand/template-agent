@@ -58,10 +58,12 @@ multi_turn:
 
 
 # Multi-agent orchestration
+# geval:delegation_compliance is NOT listed here — it is added conditionally
+# in _dataset_to_eval_cases() only when expected_tool_calls are present, because
+# delegation only occurs via tool calls to sub-agents.
 multi_agent:
   turn_metrics:
     - custom:answer_correctness
-    - geval:delegation_compliance
   turn_metrics_metadata:
     custom:tool_eval:
       ordered: false

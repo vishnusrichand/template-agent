@@ -476,6 +476,14 @@ def _dataset_to_eval_cases(dataset: dict) -> list[dict]:
                     for m in get_tool_turn_metrics():
                         if m not in turn_data["turn_metrics"]:
                             turn_data["turn_metrics"].append(m)
+                    # delegation_compliance only makes sense when sub-agent tool calls
+                    # are expected — delegation happens via tool calls, not inline text.
+                    if (
+                        tag == "multi_agent"
+                        and "geval:delegation_compliance"
+                        not in turn_data["turn_metrics"]
+                    ):
+                        turn_data["turn_metrics"].append("geval:delegation_compliance")
                     turn_data.setdefault("turn_metrics_metadata", {})
                     # ordered=True only reliable for orchestrator-level calls;
                     # subagent calls fetched from Postgres checkpoint_blobs have
