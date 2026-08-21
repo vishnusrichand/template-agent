@@ -396,7 +396,10 @@ def _build_default_subagent(
 
     from deep_agent.src.settings import settings as app_settings
 
-    if app_settings.GUARDIAN_API_BASE:
+    guardrail_cfg = agent_config.get_guardrails_config()
+    guardian_active = guardrail_cfg.enabled and bool(app_settings.GUARDIAN_API_BASE)
+
+    if guardian_active:
         from deep_agent.src.guardrails.tool_proxy import wrap_tools
 
         resolved_tools = wrap_tools(resolved_tools)
@@ -469,7 +472,10 @@ def _build_compiled_subagent(
 
     from deep_agent.src.settings import settings as app_settings
 
-    if app_settings.GUARDIAN_API_BASE:
+    guardrail_cfg = agent_config.get_guardrails_config()
+    guardian_active = guardrail_cfg.enabled and bool(app_settings.GUARDIAN_API_BASE)
+
+    if guardian_active:
         from deep_agent.src.guardrails.tool_proxy import wrap_tools
 
         resolved_tools = wrap_tools(resolved_tools)
@@ -499,7 +505,7 @@ def _build_compiled_subagent(
         runnable = PIIAwareRunnable(runnable)
         logger.info("subagent '%s' [compiled] wrapped with PIIAwareRunnable", name)
 
-    if app_settings.GUARDIAN_API_BASE:
+    if guardian_active:
         from deep_agent.aegra.safety import SafetyAwareRunnable
 
         runnable = SafetyAwareRunnable(runnable)
