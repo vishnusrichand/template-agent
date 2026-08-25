@@ -10,6 +10,87 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import deep_agent.aegra.eval_routes as er
+from deep_agent.aegra.eval_routes import _require_developer
+
+
+# ── _require_developer ────────────────────────────────────────────────────────
+
+
+class TestRequireDeveloper:
+    @pytest.mark.asyncio
+    async def test_no_token_raises_401(self):
+        with pytest.raises(er.HTTPException) as exc:
+            await _require_developer(creds=None)
+        assert exc.value.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_empty_credentials_raises_401(self):
+        creds = MagicMock()
+        creds.credentials = ""
+        with pytest.raises(er.HTTPException) as exc:
+            await _require_developer(creds=creds)
+        assert exc.value.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_dev_bypass_returns_token(self):
+        creds = MagicMock()
+        creds.credentials = "some-token"
+        with patch("deep_agent.aegra.auth.ENABLE_AUTH", False):
+            result = await _require_developer(creds=creds)
+        assert result == "some-token"
+
+    @pytest.mark.asyncio
+    async def test_valid_developer_token_returns_token(self):
+        creds = MagicMock()
+        creds.credentials = "valid-token"
+        with (
+            patch("deep_agent.aegra.auth.ENABLE_AUTH", True),
+            patch(
+                "deep_agent.aegra.auth._decode_token",
+                return_value={"sub": "dev-123", "realm_access": {"roles": ["devs"]}},
+            ),
+            patch("deep_agent.aegra.auth_helpers.settings") as mock_settings,
+        ):
+            mock_settings.RESTRICT_TO_GROUPS = True
+            mock_settings.DEVELOPER_GROUP = "devs"
+            mock_settings.USER_GROUP = "users"
+            result = await _require_developer(creds=creds)
+        assert result == "valid-token"
+
+    @pytest.mark.asyncio
+    async def test_user_group_member_denied_on_eval(self):
+        creds = MagicMock()
+        creds.credentials = "user-token"
+        with (
+            patch("deep_agent.aegra.auth.ENABLE_AUTH", True),
+            patch(
+                "deep_agent.aegra.auth._decode_token",
+                return_value={"sub": "user-1", "realm_access": {"roles": ["users"]}},
+            ),
+            patch("deep_agent.aegra.auth_helpers.settings") as mock_settings,
+        ):
+            mock_settings.RESTRICT_TO_GROUPS = True
+            mock_settings.DEVELOPER_GROUP = "devs"
+            mock_settings.USER_GROUP = "users"
+            with pytest.raises(er.HTTPException) as exc:
+                await _require_developer(creds=creds)
+        assert exc.value.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_restrict_disabled_any_auth_passes(self):
+        creds = MagicMock()
+        creds.credentials = "any-token"
+        with (
+            patch("deep_agent.aegra.auth.ENABLE_AUTH", True),
+            patch(
+                "deep_agent.aegra.auth._decode_token",
+                return_value={"sub": "user-1", "realm_access": {"roles": ["other"]}},
+            ),
+            patch("deep_agent.aegra.auth_helpers.settings") as mock_settings,
+        ):
+            mock_settings.RESTRICT_TO_GROUPS = False
+            result = await _require_developer(creds=creds)
+        assert result == "any-token"
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────

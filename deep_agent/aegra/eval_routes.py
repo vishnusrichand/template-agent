@@ -31,18 +31,27 @@ from pydantic import BaseModel
 _bearer = HTTPBearer(auto_error=False)
 
 
-def _require_bearer(
+async def _require_developer(
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ) -> str:
-    """Reject requests that carry no Bearer token.
+    """Validate JWT and enforce DEVELOPER_GROUP membership for eval endpoints.
 
-    Both /v1/eval/run and /v1/eval/thread-tool-calls/{thread_id} invoke the
-    production agent or read checkpoint blobs that may contain user PII.
-    Callers (run_eval.py subprocess) always forward the session token; any
-    request without one is unauthenticated and must be rejected.
+    When ENABLE_AUTH=false, passes through without group check.
+    When RESTRICT_TO_GROUPS=true, only DEVELOPER_GROUP members pass.
+    Returns the raw Bearer token string.
     """
+    import asyncio as _asyncio
+
+    from deep_agent.aegra.auth import ENABLE_AUTH, _decode_token
+    from deep_agent.aegra.auth_helpers import check_group_access
+
     if creds is None or not creds.credentials:
         raise HTTPException(status_code=401, detail="Bearer token required")
+    if not ENABLE_AUTH:
+        return str(creds.credentials)
+    payload = await _asyncio.to_thread(_decode_token, creds.credentials)
+    permissions = payload.get("realm_access", {}).get("roles", [])
+    check_group_access(permissions, developer_only=True)
     return str(creds.credentials)
 
 
@@ -466,7 +475,7 @@ def _detect_interrupt(run_state: dict) -> bool:
 @router.get("/thread-tool-calls/{thread_id}")
 async def get_thread_tool_calls(
     thread_id: str,
-    _token: str = Depends(_require_bearer),
+    _token: str = Depends(_require_developer),
 ) -> dict[str, Any]:
     """Return all subagent tool calls for a completed thread.
 
@@ -480,7 +489,7 @@ async def get_thread_tool_calls(
 @router.post("/run", response_model=EvalRunResponse)
 async def eval_run(
     body: EvalRunRequest,
-    _token: str = Depends(_require_bearer),
+    _token: str = Depends(_require_developer),
 ) -> EvalRunResponse:
     """Run one conversation turn for eval purposes.
 

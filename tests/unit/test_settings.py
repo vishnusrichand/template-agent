@@ -192,3 +192,43 @@ class TestUiOrigin:
     def test_returns_none_when_neither_set(self):
         s = Settings(UI_ORIGIN=None, AGENT_PUBLIC_BASE_URL=None)
         assert s.ui_origin is None
+
+
+class TestGroupAccessSettings:
+    def test_restrict_to_groups_defaults_false(self):
+        s = Settings()
+        assert s.RESTRICT_TO_GROUPS is False
+
+    def test_developer_group_defaults_empty(self):
+        s = Settings()
+        assert s.DEVELOPER_GROUP == ""
+
+    def test_user_group_defaults_empty(self):
+        s = Settings()
+        assert s.USER_GROUP == ""
+
+    def test_group_fields_read_from_constructor(self):
+        s = Settings(DEVELOPER_GROUP="lightspeed-dev", USER_GROUP="lightspeed-user")
+        assert s.DEVELOPER_GROUP == "lightspeed-dev"
+        assert s.USER_GROUP == "lightspeed-user"
+
+    def test_restrict_to_groups_enabled(self):
+        s = Settings(RESTRICT_TO_GROUPS=True)
+        assert s.RESTRICT_TO_GROUPS is True
+
+    def test_validate_config_warns_when_restrict_enabled_but_no_groups(self, caplog):
+        import logging
+        s = Settings(RESTRICT_TO_GROUPS=True, DEVELOPER_GROUP="", USER_GROUP="")
+        with caplog.at_level(logging.WARNING, logger="deep_agent"):
+            validate_config(s)
+        assert any("RESTRICT_TO_GROUPS" in r.message for r in caplog.records)
+
+    def test_validate_config_no_warning_when_developer_group_set(self, caplog):
+        import logging
+        s = Settings(RESTRICT_TO_GROUPS=True, DEVELOPER_GROUP="devs", USER_GROUP="")
+        with caplog.at_level(logging.WARNING, logger="deep_agent"):
+            validate_config(s)
+        assert not any(
+            "RESTRICT_TO_GROUPS" in r.message and "not set" in r.message
+            for r in caplog.records
+        )
