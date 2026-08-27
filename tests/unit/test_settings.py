@@ -218,6 +218,7 @@ class TestGroupAccessSettings:
 
     def test_validate_config_warns_when_restrict_enabled_but_no_groups(self, caplog):
         import logging
+
         s = Settings(RESTRICT_TO_GROUPS=True, DEVELOPER_GROUP="", USER_GROUP="")
         with caplog.at_level(logging.WARNING, logger="deep_agent"):
             validate_config(s)
@@ -225,6 +226,7 @@ class TestGroupAccessSettings:
 
     def test_validate_config_no_warning_when_developer_group_set(self, caplog):
         import logging
+
         s = Settings(RESTRICT_TO_GROUPS=True, DEVELOPER_GROUP="devs", USER_GROUP="")
         with caplog.at_level(logging.WARNING, logger="deep_agent"):
             validate_config(s)

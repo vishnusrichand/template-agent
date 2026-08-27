@@ -53,7 +53,9 @@ class TestCheckGroupAccess:
             mock_settings.RESTRICT_TO_GROUPS = True
             mock_settings.DEVELOPER_GROUP = "lightspeed-developer"
             mock_settings.USER_GROUP = "lightspeed-user"
-            check_group_access(["lightspeed-developer"], developer_only=True)  # should not raise
+            check_group_access(
+                ["lightspeed-developer"], developer_only=True
+            )  # should not raise
 
     def test_empty_groups_denies_everyone(self):
         with patch("deep_agent.aegra.auth_helpers.settings") as mock_settings:
