@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 import deep_agent.aegra.eval_routes as er
 from deep_agent.aegra.eval_routes import _require_developer
-
 
 # ── _require_developer ────────────────────────────────────────────────────────
 
@@ -696,7 +693,7 @@ class TestEvalHistory:
         with patch(
             "deep_agent.aegra.eval_routes._pg_conn", AsyncMock(return_value=conn)
         ):
-            result = await er.eval_history(mock_request)
+            await er.eval_history(mock_request)
 
         # Query should have been called with limit=100, not 9999
         call_args = conn.execute.call_args[0][1]
