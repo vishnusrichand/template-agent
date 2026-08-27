@@ -91,13 +91,6 @@ class Settings(BaseSettings):
     SSO_DEV_USERNAME: str = Field(default="John Doe")
     SSO_DEV_USER_ID: str = Field(default="dev-user")
     ENABLE_USER_ID_ENCRYPTION: bool = Field(default=False)
-    RESTRICT_TO_GROUPS: bool = Field(
-        default=False,
-        description=(
-            "When true, restrict access to users in DEVELOPER_GROUP or USER_GROUP. "
-            "Ignored when ENABLE_AUTH=false."
-        ),
-    )
     DEVELOPER_GROUP: str = Field(
         default="",
         description="Keycloak realm_access.roles value for developers. Full access including eval.",
@@ -315,16 +308,6 @@ def validate_config(settings: Settings) -> None:
                 "(http:// is permitted only for localhost, *.localhost, 127.0.0.1, or ::1)",
                 ErrorCodes.CONFIGURATION_VALIDATION_ERROR,
             )
-
-    if (
-        settings.RESTRICT_TO_GROUPS
-        and not settings.DEVELOPER_GROUP
-        and not settings.USER_GROUP
-    ):
-        logger.warning(
-            "RESTRICT_TO_GROUPS=true but both DEVELOPER_GROUP and USER_GROUP are not set — "
-            "all authenticated requests will be denied with 403."
-        )
 
     # Production-specific validations
     if settings.is_production:

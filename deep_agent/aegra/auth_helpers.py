@@ -13,20 +13,17 @@ logger = get_python_logger()
 
 
 def check_group_access(permissions: list[str], *, developer_only: bool = False) -> None:
-    """Enforce group-based access restriction when RESTRICT_TO_GROUPS is enabled.
+    """Enforce group-based access from DEVELOPER_GROUP / USER_GROUP.
 
-    No-op when RESTRICT_TO_GROUPS=false or ENABLE_AUTH=false (caller handles bypass).
-    Raises HTTPException(403) when the user lacks required group membership.
-
-    Args:
-        permissions: Keycloak roles from realm_access.roles.
-        developer_only: When True, only DEVELOPER_GROUP passes (eval endpoints).
+    Both empty: unrestricted (caller still enforces ENABLE_AUTH).
+    Only one group set: that group is an allow-list.
+    Both set: DEVELOPER_GROUP has full access; USER_GROUP has non-eval access.
+    developer_only=True requires DEVELOPER_GROUP (eval endpoints).
     """
-    if not settings.RESTRICT_TO_GROUPS:
+    dev_group = (settings.DEVELOPER_GROUP or "").strip()
+    user_group = (settings.USER_GROUP or "").strip()
+    if not dev_group and not user_group:
         return
-
-    dev_group = settings.DEVELOPER_GROUP
-    user_group = settings.USER_GROUP
 
     if developer_only:
         if dev_group and dev_group in permissions:
@@ -43,12 +40,10 @@ def check_group_access(permissions: list[str], *, developer_only: bool = False) 
     if user_group and user_group in permissions:
         return
     allowed = " or ".join(g for g in [dev_group, user_group] if g)
-    detail = (
-        f"Access denied: '{allowed}' group membership required."
-        if allowed
-        else "Access denied: no access groups are configured."
+    raise HTTPException(
+        status_code=403,
+        detail=f"Access denied: '{allowed}' group membership required.",
     )
-    raise HTTPException(status_code=403, detail=detail)
 
 
 async def authenticated_user_id(

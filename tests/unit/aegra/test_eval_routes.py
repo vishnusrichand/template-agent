@@ -48,7 +48,6 @@ class TestRequireDeveloper:
             ),
             patch("deep_agent.aegra.auth_helpers.settings") as mock_settings,
         ):
-            mock_settings.RESTRICT_TO_GROUPS = True
             mock_settings.DEVELOPER_GROUP = "devs"
             mock_settings.USER_GROUP = "users"
             result = await _require_developer(creds=creds)
@@ -66,7 +65,6 @@ class TestRequireDeveloper:
             ),
             patch("deep_agent.aegra.auth_helpers.settings") as mock_settings,
         ):
-            mock_settings.RESTRICT_TO_GROUPS = True
             mock_settings.DEVELOPER_GROUP = "devs"
             mock_settings.USER_GROUP = "users"
             with pytest.raises(er.HTTPException) as exc:
@@ -74,7 +72,7 @@ class TestRequireDeveloper:
         assert exc.value.status_code == 403
 
     @pytest.mark.asyncio
-    async def test_restrict_disabled_any_auth_passes(self):
+    async def test_groups_unset_any_auth_passes(self):
         creds = MagicMock()
         creds.credentials = "any-token"
         with (
@@ -85,7 +83,8 @@ class TestRequireDeveloper:
             ),
             patch("deep_agent.aegra.auth_helpers.settings") as mock_settings,
         ):
-            mock_settings.RESTRICT_TO_GROUPS = False
+            mock_settings.DEVELOPER_GROUP = ""
+            mock_settings.USER_GROUP = ""
             result = await _require_developer(creds=creds)
         assert result == "any-token"
 

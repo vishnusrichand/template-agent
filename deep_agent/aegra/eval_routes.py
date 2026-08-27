@@ -37,7 +37,8 @@ async def _require_developer(
     """Validate JWT and enforce DEVELOPER_GROUP membership for eval endpoints.
 
     When ENABLE_AUTH=false, passes through without group check.
-    When RESTRICT_TO_GROUPS=true, only DEVELOPER_GROUP members pass.
+    When DEVELOPER_GROUP is set, only its members pass. If only USER_GROUP is set,
+    eval is denied (no developer group). Both empty: unrestricted.
     Returns the raw Bearer token string.
     """
     import asyncio as _asyncio

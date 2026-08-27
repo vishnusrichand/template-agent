@@ -65,9 +65,6 @@ ENABLE_USER_ID_ENCRYPTION = (
 )
 USER_ID_ENCRYPTION_KEY = os.environ.get("USER_ID_ENCRYPTION_KEY", "")
 
-RESTRICT_TO_GROUPS: bool = (
-    os.environ.get("RESTRICT_TO_GROUPS", "false").lower() == "true"
-)
 DEVELOPER_GROUP: str = os.environ.get("DEVELOPER_GROUP", "")
 USER_GROUP: str = os.environ.get("USER_GROUP", "")
 
@@ -348,21 +345,21 @@ async def authenticate(headers: dict) -> dict:
 def _check_group_for_langgraph(permissions: list[str]) -> None:
     """Enforce group restriction for LangGraph auth layer.
 
+    Unrestricted when both DEVELOPER_GROUP and USER_GROUP are empty.
+    Only one group set: that group is an allow-list.
     Raises PermissionError (not HTTPException) — LangGraph converts this to
-    an auth failure response. Non-developer path: either group is sufficient.
+    an auth failure response. Non-developer path: either configured group is sufficient.
     """
-    if not RESTRICT_TO_GROUPS:
+    dev_group = DEVELOPER_GROUP.strip()
+    user_group = USER_GROUP.strip()
+    if not dev_group and not user_group:
         return
-    if DEVELOPER_GROUP and DEVELOPER_GROUP in permissions:
+    if dev_group and dev_group in permissions:
         return
-    if USER_GROUP and USER_GROUP in permissions:
+    if user_group and user_group in permissions:
         return
-    allowed = " or ".join(g for g in [DEVELOPER_GROUP, USER_GROUP] if g)
-    raise PermissionError(
-        f"Access denied: '{allowed}' group membership required."
-        if allowed
-        else "Access denied: no access groups are configured."
-    )
+    allowed = " or ".join(g for g in [dev_group, user_group] if g)
+    raise PermissionError(f"Access denied: '{allowed}' group membership required.")
 
 
 def _checked_make_user(
