@@ -1,11 +1,163 @@
 """Unit tests for shared authentication helpers."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
 
-from deep_agent.aegra.auth_helpers import authenticated_user_id
+from deep_agent.aegra.auth_helpers import authenticated_user_id, check_group_access
+
+
+def _groups(*, developer: str = "", user: str = ""):
+    mock_settings = patch("deep_agent.aegra.auth_helpers.settings")
+    settings = mock_settings.start()
+    settings.DEVELOPER_GROUP = developer
+    settings.USER_GROUP = user
+    return mock_settings, settings
+
+
+class TestCheckGroupAccess:
+    def test_open_when_both_groups_empty(self):
+        ctx, _ = _groups()
+        try:
+            check_group_access([])
+            check_group_access(["some-role"])
+            check_group_access(["some-role"], developer_only=True)
+        finally:
+            ctx.stop()
+
+    def test_only_developer_group_allows_members(self):
+        ctx, _ = _groups(developer="lightspeed-developer")
+        try:
+            check_group_access(["lightspeed-developer"])
+            check_group_access(["lightspeed-developer"], developer_only=True)
+        finally:
+            ctx.stop()
+
+    def test_only_developer_group_denies_others(self):
+        ctx, _ = _groups(developer="lightspeed-developer")
+        try:
+            with pytest.raises(HTTPException) as exc:
+                check_group_access(["anyone"])
+            assert exc.value.status_code == 403
+            with pytest.raises(HTTPException) as eval_exc:
+                check_group_access(["anyone"], developer_only=True)
+            assert eval_exc.value.status_code == 403
+        finally:
+            ctx.stop()
+
+    def test_only_user_group_allows_members_non_eval(self):
+        ctx, _ = _groups(user="lightspeed-user")
+        try:
+            check_group_access(["lightspeed-user"])
+        finally:
+            ctx.stop()
+
+    def test_only_user_group_denies_eval(self):
+        ctx, _ = _groups(user="lightspeed-user")
+        try:
+            with pytest.raises(HTTPException) as exc:
+                check_group_access(["lightspeed-user"], developer_only=True)
+            assert exc.value.status_code == 403
+        finally:
+            ctx.stop()
+
+    def test_only_user_group_denies_others(self):
+        ctx, _ = _groups(user="lightspeed-user")
+        try:
+            with pytest.raises(HTTPException) as exc:
+                check_group_access(["anyone"])
+            assert exc.value.status_code == 403
+        finally:
+            ctx.stop()
+
+    def test_developer_in_developer_group_passes(self):
+        ctx, _ = _groups(developer="lightspeed-developer", user="lightspeed-user")
+        try:
+            check_group_access(["lightspeed-developer"])
+        finally:
+            ctx.stop()
+
+    def test_user_in_user_group_passes_non_eval(self):
+        ctx, _ = _groups(developer="lightspeed-developer", user="lightspeed-user")
+        try:
+            check_group_access(["lightspeed-user"])
+        finally:
+            ctx.stop()
+
+    def test_user_in_neither_group_denied(self):
+        ctx, _ = _groups(developer="lightspeed-developer", user="lightspeed-user")
+        try:
+            with pytest.raises(HTTPException) as exc:
+                check_group_access(["other-role"])
+            assert exc.value.status_code == 403
+        finally:
+            ctx.stop()
+
+    def test_developer_only_blocks_user_group(self):
+        ctx, _ = _groups(developer="lightspeed-developer", user="lightspeed-user")
+        try:
+            with pytest.raises(HTTPException) as exc:
+                check_group_access(["lightspeed-user"], developer_only=True)
+            assert exc.value.status_code == 403
+        finally:
+            ctx.stop()
+
+    def test_developer_only_passes_for_developer(self):
+        ctx, _ = _groups(developer="lightspeed-developer", user="lightspeed-user")
+        try:
+            check_group_access(["lightspeed-developer"], developer_only=True)
+        finally:
+            ctx.stop()
+
+
+class TestAuthenticatedUserIdGroupCheck:
+    @pytest.mark.asyncio
+    async def test_group_check_skipped_when_auth_disabled(self):
+        request = MagicMock()
+        with (
+            patch("deep_agent.aegra.auth.ENABLE_AUTH", False),
+            patch("deep_agent.aegra.auth_helpers.settings") as mock_settings,
+        ):
+            mock_settings.DEVELOPER_GROUP = "devs"
+            mock_settings.USER_GROUP = "users"
+            result = await authenticated_user_id(request)
+        assert result == "dev-user"
+
+    @pytest.mark.asyncio
+    async def test_group_check_called_with_token_roles(self):
+        request = MagicMock()
+        request.headers = {"authorization": "Bearer tok"}
+        with (
+            patch("deep_agent.aegra.auth.ENABLE_AUTH", True),
+            patch(
+                "deep_agent.aegra.auth._decode_token",
+                return_value={"sub": "u1", "realm_access": {"roles": ["devs"]}},
+            ),
+            patch("deep_agent.aegra.auth_helpers.settings") as mock_settings,
+        ):
+            mock_settings.DEVELOPER_GROUP = "devs"
+            mock_settings.USER_GROUP = "users"
+            result = await authenticated_user_id(request)
+        assert result == "u1"
+
+    @pytest.mark.asyncio
+    async def test_developer_only_param_raises_403_for_user_group(self):
+        request = MagicMock()
+        request.headers = {"authorization": "Bearer tok"}
+        with (
+            patch("deep_agent.aegra.auth.ENABLE_AUTH", True),
+            patch(
+                "deep_agent.aegra.auth._decode_token",
+                return_value={"sub": "u1", "realm_access": {"roles": ["users"]}},
+            ),
+            patch("deep_agent.aegra.auth_helpers.settings") as mock_settings,
+        ):
+            mock_settings.DEVELOPER_GROUP = "devs"
+            mock_settings.USER_GROUP = "users"
+            with pytest.raises(HTTPException) as exc:
+                await authenticated_user_id(request, developer_only=True)
+        assert exc.value.status_code == 403
 
 
 class TestAuthenticatedUserId:
@@ -51,7 +203,6 @@ class TestAuthenticatedUserId:
 
     @pytest.mark.asyncio
     async def test_invalid_token_propagates_exception(self):
-        """An expired or malformed JWT causes _decode_token to raise; verify it propagates."""
         request = MagicMock()
         request.headers = {"authorization": "Bearer expired-token"}
         with (

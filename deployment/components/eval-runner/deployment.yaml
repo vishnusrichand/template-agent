@@ -1,37 +1,38 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: agent
+  name: eval-runner
   labels:
-    app: agent
-    component: agent
+    app: eval-runner
+    component: eval-runner
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: agent
-      component: agent
+      app: eval-runner
+      component: eval-runner
   template:
     metadata:
       labels:
-        app: agent
-        component: agent
+        app: eval-runner
+        component: eval-runner
     spec:
       containers:
-        - name: agent
-          image: agent:local
-          imagePullPolicy: IfNotPresent
+        - name: eval-runner
+          image: eval-runner:latest
+          imagePullPolicy: Never
           ports:
-            - containerPort: 5002
+            - containerPort: 8099
               name: http
               protocol: TCP
           env:
+            - name: AGENT_CONFIG_DIR
+              valueFrom:
+                configMapKeyRef:
+                  name: eval-runner-config
+                  key: AGENT_CONFIG_DIR
             - name: AGENT_HOST
-              value: "0.0.0.0"
-            - name: AGENT_PORT
-              value: "5002"
-            - name: PYTHON_LOG_LEVEL
-              value: "INFO"
+              value: "http://agent:5002"
             - name: POSTGRES_HOST
               valueFrom:
                 configMapKeyRef:
@@ -57,69 +58,50 @@ spec:
                 secretKeyRef:
                   name: agent-secrets
                   key: POSTGRES_PASSWORD
-            - name: REDIS_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: agent-config
-                  key: REDIS_URL
-            - name: EVAL_RUNNER_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: agent-config
-                  key: EVAL_RUNNER_URL
-                  optional: true
-            - name: GOOGLE_APPLICATION_CREDENTIALS_CONTENT
+            - name: EVAL_INTERNAL_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: agent-secrets
-                  key: GOOGLE_APPLICATION_CREDENTIALS_CONTENT
-                  optional: true
-            - name: LANGFUSE_PUBLIC_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: agent-secrets
-                  key: LANGFUSE_PUBLIC_KEY
-                  optional: true
-            - name: LANGFUSE_SECRET_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: agent-secrets
-                  key: LANGFUSE_SECRET_KEY
-                  optional: true
-            - name: LANGFUSE_BASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: agent-secrets
-                  key: LANGFUSE_BASE_URL
+                  key: EVAL_INTERNAL_TOKEN
                   optional: true
           startupProbe:
             httpGet:
               path: /health
-              port: 5002
-            initialDelaySeconds: 10
+              port: 8099
+            initialDelaySeconds: 5
             periodSeconds: 5
-            failureThreshold: 30
+            failureThreshold: 12
           livenessProbe:
             httpGet:
               path: /health
-              port: 5002
+              port: 8099
             initialDelaySeconds: 30
-            periodSeconds: 10
+            periodSeconds: 15
             timeoutSeconds: 5
             failureThreshold: 3
           readinessProbe:
             httpGet:
               path: /health
-              port: 5002
+              port: 8099
             initialDelaySeconds: 10
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 3
+          volumeMounts:
+            - name: agent-config
+              mountPath: /agent-config
+              readOnly: true
+
           resources:
             requests:
               memory: "256Mi"
               cpu: "100m"
             limits:
-              memory: "512Mi"
-              cpu: "500m"
-      restartPolicy: Always
+              memory: "1Gi"
+              cpu: "1000m"
+
+      volumes:
+        - name: agent-config
+          persistentVolumeClaim:
+            claimName: agent-source-data
+            readOnly: true

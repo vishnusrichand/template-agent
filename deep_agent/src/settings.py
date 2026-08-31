@@ -91,6 +91,14 @@ class Settings(BaseSettings):
     SSO_DEV_USERNAME: str = Field(default="John Doe")
     SSO_DEV_USER_ID: str = Field(default="dev-user")
     ENABLE_USER_ID_ENCRYPTION: bool = Field(default=False)
+    DEVELOPER_GROUP: str = Field(
+        default="",
+        description="Keycloak realm_access.roles value for developers. Full access including eval.",
+    )
+    USER_GROUP: str = Field(
+        default="",
+        description="Keycloak realm_access.roles value for regular users. Non-eval access only.",
+    )
 
     # ── Environment ───────────────────────────────────────────────────
     ENVIRONMENT: str = Field(

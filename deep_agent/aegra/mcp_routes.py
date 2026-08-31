@@ -41,6 +41,9 @@ async def _authenticated_user_id(request: Request) -> str:
         )
 
     payload = _decode_token(auth_header[7:])
+    from deep_agent.aegra.auth_helpers import check_group_access
+
+    check_group_access(payload.get("realm_access", {}).get("roles", []))
     return str(payload["sub"])
 
 

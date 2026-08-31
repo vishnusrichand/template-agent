@@ -192,3 +192,18 @@ class TestUiOrigin:
     def test_returns_none_when_neither_set(self):
         s = Settings(UI_ORIGIN=None, AGENT_PUBLIC_BASE_URL=None)
         assert s.ui_origin is None
+
+
+class TestGroupAccessSettings:
+    def test_developer_group_defaults_empty(self):
+        s = Settings(_env_file=None)
+        assert s.DEVELOPER_GROUP == ""
+
+    def test_user_group_defaults_empty(self):
+        s = Settings(_env_file=None)
+        assert s.USER_GROUP == ""
+
+    def test_group_fields_read_from_constructor(self):
+        s = Settings(DEVELOPER_GROUP="lightspeed-dev", USER_GROUP="lightspeed-user")
+        assert s.DEVELOPER_GROUP == "lightspeed-dev"
+        assert s.USER_GROUP == "lightspeed-user"

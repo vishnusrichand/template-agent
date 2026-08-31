@@ -197,6 +197,8 @@ async def feedback_handler(request: Request) -> JSONResponse:
 
     try:
         jwt_user_id = await authenticated_user_id(request)
+    except HTTPException:
+        raise
     except Exception:
         logger.warning("JWT decode failed in feedback handler", exc_info=True)
         jwt_user_id = "anonymous"
