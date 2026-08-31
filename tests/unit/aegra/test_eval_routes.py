@@ -88,6 +88,87 @@ class TestRequireDeveloper:
             result = await _require_developer(creds=creds)
         assert result == "any-token"
 
+    @pytest.mark.asyncio
+    async def test_expired_token_raises_401(self, caplog):
+        import jwt
+
+        creds = MagicMock()
+        creds.credentials = "expired-token"
+        with (
+            patch("deep_agent.aegra.auth.ENABLE_AUTH", True),
+            patch(
+                "deep_agent.aegra.auth._decode_token",
+                side_effect=jwt.ExpiredSignatureError(),
+            ),
+            caplog.at_level("WARNING"),
+        ):
+            with pytest.raises(er.HTTPException) as exc:
+                await _require_developer(creds=creds)
+        assert exc.value.status_code == 401
+        assert exc.value.detail == "Token expired"
+        assert "Token expired" in caplog.text
+
+
+class TestEvalMgmtRequiresDeveloper:
+    """/evals/* management routes must reject USER_GROUP members (403)."""
+
+    def _client(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        app = FastAPI()
+        app.include_router(er.eval_mgmt_router)
+        return TestClient(app)
+
+    def test_user_group_member_gets_403_on_status(self):
+        client = self._client()
+        with (
+            patch("deep_agent.aegra.auth.ENABLE_AUTH", True),
+            patch(
+                "deep_agent.aegra.auth._decode_token",
+                return_value={"sub": "user-1", "realm_access": {"roles": ["users"]}},
+            ),
+            patch("deep_agent.aegra.auth_helpers.settings") as mock_settings,
+        ):
+            mock_settings.DEVELOPER_GROUP = ""
+            mock_settings.USER_GROUP = "users"
+            resp = client.get("/evals/status", headers={"Authorization": "Bearer tok"})
+        assert resp.status_code == 403
+
+    def test_user_group_member_gets_403_on_trigger(self):
+        client = self._client()
+        with (
+            patch("deep_agent.aegra.auth.ENABLE_AUTH", True),
+            patch(
+                "deep_agent.aegra.auth._decode_token",
+                return_value={"sub": "user-1", "realm_access": {"roles": ["users"]}},
+            ),
+            patch("deep_agent.aegra.auth_helpers.settings") as mock_settings,
+        ):
+            mock_settings.DEVELOPER_GROUP = "devs"
+            mock_settings.USER_GROUP = "users"
+            resp = client.post(
+                "/evals/trigger", headers={"Authorization": "Bearer tok"}
+            )
+        assert resp.status_code == 403
+
+    def test_expired_token_gets_401_on_trigger(self):
+        import jwt
+
+        client = self._client()
+        with (
+            patch("deep_agent.aegra.auth.ENABLE_AUTH", True),
+            patch(
+                "deep_agent.aegra.auth._decode_token",
+                side_effect=jwt.ExpiredSignatureError(),
+            ),
+        ):
+            resp = client.post(
+                "/evals/trigger", headers={"Authorization": "Bearer tok"}
+            )
+        assert resp.status_code == 401
+        assert resp.json() == {"detail": "Token expired"}
+
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 

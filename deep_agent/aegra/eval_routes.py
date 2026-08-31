@@ -43,6 +43,8 @@ async def _require_developer(
     """
     import asyncio as _asyncio
 
+    import jwt
+
     from deep_agent.aegra.auth import ENABLE_AUTH, _decode_token
     from deep_agent.aegra.auth_helpers import check_group_access
 
@@ -50,7 +52,11 @@ async def _require_developer(
         raise HTTPException(status_code=401, detail="Bearer token required")
     if not ENABLE_AUTH:
         return str(creds.credentials)
-    payload = await _asyncio.to_thread(_decode_token, creds.credentials)
+    try:
+        payload = await _asyncio.to_thread(_decode_token, creds.credentials)
+    except jwt.ExpiredSignatureError:
+        logging.getLogger(__name__).warning("Token expired")
+        raise HTTPException(status_code=401, detail="Token expired") from None
     permissions = payload.get("realm_access", {}).get("roles", [])
     check_group_access(permissions, developer_only=True)
     return str(creds.credentials)
@@ -895,7 +901,9 @@ async def _require_eval_files() -> None:
             )
 
 
-@eval_mgmt_router.post("/trigger", response_model=None)
+@eval_mgmt_router.post(
+    "/trigger", response_model=None, dependencies=[Depends(_require_developer)]
+)
 async def trigger_eval(request: Request) -> Any:
     """Cache-first eval trigger. Returns cached result or sets in_progress."""
     if not _EVAL_RUNNER_URL:
@@ -967,7 +975,9 @@ async def trigger_eval(request: Request) -> Any:
     return await _queue_eval_run(config_hash, request, record)
 
 
-@eval_mgmt_router.post("/force-trigger", response_model=None)
+@eval_mgmt_router.post(
+    "/force-trigger", response_model=None, dependencies=[Depends(_require_developer)]
+)
 async def force_trigger_eval(request: Request) -> Any:
     """Force a fresh eval run, bypassing cache."""
     if not _EVAL_RUNNER_URL:
@@ -1028,7 +1038,7 @@ async def _queue_eval_run(
 _EVAL_STALE_TIMEOUT_MINUTES = int(os.environ.get("EVAL_STALE_TIMEOUT_MINUTES", "30"))
 
 
-@eval_mgmt_router.get("/status")
+@eval_mgmt_router.get("/status", dependencies=[Depends(_require_developer)])
 async def eval_status() -> dict[str, Any]:
     """Return the latest eval record for this agent.
 
@@ -1082,7 +1092,7 @@ async def eval_status() -> dict[str, Any]:
         raise
 
 
-@eval_mgmt_router.get("/results")
+@eval_mgmt_router.get("/results", dependencies=[Depends(_require_developer)])
 async def eval_results(request: Request) -> dict[str, Any]:
     """Return a completed eval report.
 
@@ -1128,7 +1138,7 @@ async def eval_results(request: Request) -> dict[str, Any]:
         raise
 
 
-@eval_mgmt_router.get("/history")
+@eval_mgmt_router.get("/history", dependencies=[Depends(_require_developer)])
 async def eval_history(request: Request) -> dict[str, Any]:
     """Return historical completed eval runs (scalars only, no results_detail)."""
     try:
@@ -1179,7 +1189,7 @@ async def eval_history(request: Request) -> dict[str, Any]:
     return {"runs": runs, "total": total}
 
 
-@eval_mgmt_router.get("/trends")
+@eval_mgmt_router.get("/trends", dependencies=[Depends(_require_developer)])
 async def eval_trends(request: Request) -> dict[str, Any]:
     """Return per-metric score trends across historical eval runs."""
     try:
@@ -1286,7 +1296,7 @@ def _collect_agent_models() -> list[dict[str, Any]]:
     return models
 
 
-@eval_mgmt_router.get("/models")
+@eval_mgmt_router.get("/models", dependencies=[Depends(_require_developer)])
 async def get_eval_models() -> dict[str, Any]:
     """Return available LLM models for evaluation (orchestrator + subagents)."""
     return {"models": _collect_agent_models()}
@@ -1299,7 +1309,7 @@ class DatasetUpsertRequest(BaseModel):
     judge_model: str | None = None
 
 
-@eval_mgmt_router.post("/dataset")
+@eval_mgmt_router.post("/dataset", dependencies=[Depends(_require_developer)])
 async def upsert_dataset(body: DatasetUpsertRequest) -> dict[str, Any]:
     """Upsert the eval dataset for this agent.
 
@@ -1323,7 +1333,7 @@ async def upsert_dataset(body: DatasetUpsertRequest) -> dict[str, Any]:
     return {"status": "ok", "case_count": len(body.cases)}
 
 
-@eval_mgmt_router.get("/dataset")
+@eval_mgmt_router.get("/dataset", dependencies=[Depends(_require_developer)])
 async def get_dataset() -> dict[str, Any]:
     """Return the stored eval dataset for this agent."""
     from fastapi import HTTPException

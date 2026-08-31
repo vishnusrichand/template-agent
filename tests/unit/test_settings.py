@@ -196,11 +196,11 @@ class TestUiOrigin:
 
 class TestGroupAccessSettings:
     def test_developer_group_defaults_empty(self):
-        s = Settings()
+        s = Settings(_env_file=None)
         assert s.DEVELOPER_GROUP == ""
 
     def test_user_group_defaults_empty(self):
-        s = Settings()
+        s = Settings(_env_file=None)
         assert s.USER_GROUP == ""
 
     def test_group_fields_read_from_constructor(self):
