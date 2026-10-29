@@ -143,7 +143,7 @@ class ExtraContentChatOpenAI(ChatOpenAI):
         any history trimming are irrelevant. Stashed ids with no matching tool
         call in this payload are ignored.
         """
-        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        payload: dict = super()._get_request_payload(input_, stop=stop, **kwargs)
 
         # The Responses API payload has a different shape and no "messages".
         if self._use_responses_api(payload):
@@ -170,7 +170,10 @@ class ExtraContentChatOpenAI(ChatOpenAI):
             for tool_call in message_dict.get("tool_calls") or []:
                 if not isinstance(tool_call, dict):
                     continue
-                extra = stashed.get(tool_call.get("id"))
+                call_id = tool_call.get("id")
+                if not isinstance(call_id, str):
+                    continue
+                extra = stashed.get(call_id)
                 if extra is not None:
                     tool_call[EXTRA_CONTENT_KEY] = extra
 

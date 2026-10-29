@@ -1,5 +1,8 @@
 """Unit tests for the OpenAI-compatible extra_content pass-through."""
 
+import inspect
+from unittest.mock import MagicMock, patch
+
 import pytest
 from langchain_core.messages import (
     AIMessage,
@@ -7,7 +10,9 @@ from langchain_core.messages import (
     HumanMessage,
     ToolMessage,
 )
+from langchain_openai import ChatOpenAI
 
+from deep_agent.src.agent.llm import _create_vllm_model
 from deep_agent.src.agent.openai_compat import (
     EXTRA_CONTENT_KEY,
     ExtraContentChatOpenAI,
@@ -263,3 +268,38 @@ class TestStreamingCapture:
             None,
         )
         assert gen is None or EXTRA_CONTENT_KEY not in gen.message.additional_kwargs
+
+
+class TestVllmRouteUsesSubclass:
+    def test_create_vllm_model_returns_subclass(self):
+        # Patch the whole settings object, matching tests/unit/agent/test_llm.py.
+        mock_settings = MagicMock()
+        mock_settings.VLLM_BASE_URL = "http://x/v1"
+        mock_settings.VLLM_API_KEY = "test"
+        with patch("deep_agent.src.agent.llm.settings", mock_settings):
+            model = _create_vllm_model("gemini-3.5-flash", 0.0, 8192)
+        assert isinstance(model, ExtraContentChatOpenAI)
+        assert model.model_name == "gemini-3.5-flash"
+
+
+class TestLangchainOpenAIUpgradeTripwire:
+    """Fails loudly if langchain-openai renames or reshapes what we override."""
+
+    @pytest.mark.parametrize(
+        ("method", "params"),
+        [
+            ("_create_chat_result", ["self", "response", "generation_info"]),
+            (
+                "_convert_chunk_to_generation_chunk",
+                ["self", "chunk", "default_chunk_class", "base_generation_info"],
+            ),
+            ("_get_request_payload", ["self", "input_", "stop"]),
+        ],
+    )
+    def test_overridden_method_signature_is_unchanged(self, method, params):
+        assert hasattr(ChatOpenAI, method)
+        actual = list(inspect.signature(getattr(ChatOpenAI, method)).parameters)
+        assert actual[: len(params)] == params
+
+    def test_use_responses_api_helper_still_exists(self):
+        assert hasattr(ChatOpenAI, "_use_responses_api")

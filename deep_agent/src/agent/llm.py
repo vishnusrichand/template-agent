@@ -173,7 +173,7 @@ def _create_vllm_model(
         )
 
     try:
-        from langchain_openai import ChatOpenAI
+        from deep_agent.src.agent.openai_compat import ExtraContentChatOpenAI
 
         logger.info(
             "Creating model via vLLM/OpenAI-compatible endpoint",
@@ -183,7 +183,7 @@ def _create_vllm_model(
             max_output_tokens=max_output_tokens,
         )
 
-        return ChatOpenAI(
+        return ExtraContentChatOpenAI(
             model=model_name,
             base_url=settings.VLLM_BASE_URL,
             api_key=settings.VLLM_API_KEY,
