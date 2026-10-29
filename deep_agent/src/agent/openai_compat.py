@@ -22,6 +22,7 @@ from __future__ import annotations
 from typing import Any
 
 import openai
+from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatResult
 from langchain_openai import ChatOpenAI
@@ -93,3 +94,49 @@ class ExtraContentChatOpenAI(ChatOpenAI):
                 generation.message.additional_kwargs[EXTRA_CONTENT_KEY] = captured
 
         return result
+
+    def _get_request_payload(
+        self,
+        input_: LanguageModelInput,
+        *,
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> dict:
+        """Re-attach captured ``extra_content`` to the outbound tool calls.
+
+        Matching is by tool-call id rather than position, so message order and
+        any history trimming are irrelevant. Stashed ids with no matching tool
+        call in this payload are ignored.
+        """
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+
+        # The Responses API payload has a different shape and no "messages".
+        if self._use_responses_api(payload):
+            return payload
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            return payload
+
+        stashed: dict[str, Any] = {}
+        for message in self._convert_input(input_).to_messages():
+            if isinstance(message, AIMessage):
+                captured = message.additional_kwargs.get(EXTRA_CONTENT_KEY)
+                if isinstance(captured, dict):
+                    stashed.update(captured)
+        if not stashed:
+            return payload
+
+        for message_dict in messages:
+            if (
+                not isinstance(message_dict, dict)
+                or message_dict.get("role") != "assistant"
+            ):
+                continue
+            for tool_call in message_dict.get("tool_calls") or []:
+                if not isinstance(tool_call, dict):
+                    continue
+                extra = stashed.get(tool_call.get("id"))
+                if extra is not None:
+                    tool_call[EXTRA_CONTENT_KEY] = extra
+
+        return payload

@@ -1,7 +1,7 @@
 """Unit tests for the OpenAI-compatible extra_content pass-through."""
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from deep_agent.src.agent.openai_compat import (
     EXTRA_CONTENT_KEY,
@@ -113,3 +113,80 @@ class TestCreateChatResultCapture:
         assert isinstance(message, AIMessage)
         assert message.content == "hello"
         assert EXTRA_CONTENT_KEY not in message.additional_kwargs
+
+
+def _ai_with_signature(ids_to_sig):
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "get_weather",
+                "args": {"city": "Paris"},
+                "id": id_,
+                "type": "tool_call",
+            }
+            for id_ in ids_to_sig
+        ],
+        additional_kwargs={EXTRA_CONTENT_KEY: dict(ids_to_sig)},
+    )
+
+
+class TestGetRequestPayloadReplay:
+    def _llm(self):
+        return ExtraContentChatOpenAI(
+            model="gemini-3.5-flash", api_key="test", base_url="http://x/v1"
+        )
+
+    def _conversation(self, ai):
+        return [
+            HumanMessage(content="weather in Paris?"),
+            ai,
+            ToolMessage(content="18C", tool_call_id="call_1"),
+        ]
+
+    def test_reattaches_signature_to_matching_tool_call(self):
+        payload = self._llm()._get_request_payload(
+            self._conversation(_ai_with_signature({"call_1": SIG}))
+        )
+        assistant = next(m for m in payload["messages"] if m["role"] == "assistant")
+        assert assistant["tool_calls"][0]["id"] == "call_1"
+        assert assistant["tool_calls"][0]["extra_content"] == SIG
+
+    def test_reattaches_each_of_multiple_tool_calls(self):
+        other = {"google": {"thought_signature": "def456"}}
+        payload = self._llm()._get_request_payload(
+            self._conversation(_ai_with_signature({"call_1": SIG, "call_2": other}))
+        )
+        assistant = next(m for m in payload["messages"] if m["role"] == "assistant")
+        by_id = {tc["id"]: tc.get("extra_content") for tc in assistant["tool_calls"]}
+        assert by_id == {"call_1": SIG, "call_2": other}
+
+    def test_stashed_id_absent_from_payload_is_ignored(self):
+        ai = _ai_with_signature({"call_1": SIG})
+        ai.additional_kwargs[EXTRA_CONTENT_KEY]["call_stale"] = SIG
+        payload = self._llm()._get_request_payload(self._conversation(ai))
+        assistant = next(m for m in payload["messages"] if m["role"] == "assistant")
+        assert [tc["id"] for tc in assistant["tool_calls"]] == ["call_1"]
+
+    def test_payload_unchanged_when_no_signature_stashed(self):
+        messages = [HumanMessage(content="hi")]
+        llm = self._llm()
+        assert llm._get_request_payload(messages) == super(
+            ExtraContentChatOpenAI, llm
+        )._get_request_payload(messages)
+
+    def test_no_extra_content_key_on_tool_calls_without_signature(self):
+        ai = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "get_weather",
+                    "args": {"city": "Paris"},
+                    "id": "call_1",
+                    "type": "tool_call",
+                }
+            ],
+        )
+        payload = self._llm()._get_request_payload(self._conversation(ai))
+        assistant = next(m for m in payload["messages"] if m["role"] == "assistant")
+        assert "extra_content" not in assistant["tool_calls"][0]
