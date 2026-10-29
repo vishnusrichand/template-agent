@@ -1,7 +1,12 @@
 """Unit tests for the OpenAI-compatible extra_content pass-through."""
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    HumanMessage,
+    ToolMessage,
+)
 
 from deep_agent.src.agent.openai_compat import (
     EXTRA_CONTENT_KEY,
@@ -190,3 +195,71 @@ class TestGetRequestPayloadReplay:
         payload = self._llm()._get_request_payload(self._conversation(ai))
         assistant = next(m for m in payload["messages"] if m["role"] == "assistant")
         assert "extra_content" not in assistant["tool_calls"][0]
+
+
+def _delta_chunk(tool_calls):
+    return {
+        "id": "chunk-1",
+        "model": "gemini-3.5-flash",
+        "choices": [
+            {"index": 0, "finish_reason": None, "delta": {"tool_calls": tool_calls}}
+        ],
+    }
+
+
+def _delta_tool_call(id_, extra=None, index=None):
+    tc = {
+        "index": index,
+        "id": id_,
+        "type": "function",
+        "function": {"name": "get_weather", "arguments": '{"city":"Paris"}'},
+    }
+    if extra is not None:
+        tc["extra_content"] = extra
+    return tc
+
+
+class TestStreamingCapture:
+    def _llm(self):
+        return ExtraContentChatOpenAI(
+            model="gemini-3.5-flash", api_key="test", base_url="http://x/v1"
+        )
+
+    def test_captures_signature_from_delta_with_null_index(self):
+        gen = self._llm()._convert_chunk_to_generation_chunk(
+            _delta_chunk([_delta_tool_call("call_1", extra=SIG, index=None)]),
+            AIMessageChunk,
+            None,
+        )
+        assert gen.message.additional_kwargs[EXTRA_CONTENT_KEY] == {"call_1": SIG}
+
+    def test_no_key_added_when_absent(self):
+        gen = self._llm()._convert_chunk_to_generation_chunk(
+            _delta_chunk([_delta_tool_call("call_1", index=0)]), AIMessageChunk, None
+        )
+        assert EXTRA_CONTENT_KEY not in gen.message.additional_kwargs
+
+    def test_signatures_survive_chunk_merge(self):
+        other = {"google": {"thought_signature": "def456"}}
+        llm = self._llm()
+        first = llm._convert_chunk_to_generation_chunk(
+            _delta_chunk([_delta_tool_call("call_1", extra=SIG)]), AIMessageChunk, None
+        )
+        second = llm._convert_chunk_to_generation_chunk(
+            _delta_chunk([_delta_tool_call("call_2", extra=other)]),
+            AIMessageChunk,
+            None,
+        )
+        merged = first + second
+        assert merged.message.additional_kwargs[EXTRA_CONTENT_KEY] == {
+            "call_1": SIG,
+            "call_2": other,
+        }
+
+    def test_chunk_without_choices_returns_super_result(self):
+        gen = self._llm()._convert_chunk_to_generation_chunk(
+            {"id": "c", "model": "m", "choices": [], "usage": None},
+            AIMessageChunk,
+            None,
+        )
+        assert gen is None or EXTRA_CONTENT_KEY not in gen.message.additional_kwargs

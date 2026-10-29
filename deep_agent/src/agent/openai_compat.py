@@ -23,8 +23,8 @@ from typing import Any
 
 import openai
 from langchain_core.language_models import LanguageModelInput
-from langchain_core.messages import AIMessage
-from langchain_core.outputs import ChatResult
+from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from langchain_openai import ChatOpenAI
 
 # Key used both for the raw field on a tool call and for the stash on
@@ -94,6 +94,41 @@ class ExtraContentChatOpenAI(ChatOpenAI):
                 generation.message.additional_kwargs[EXTRA_CONTENT_KEY] = captured
 
         return result
+
+    def _convert_chunk_to_generation_chunk(
+        self,
+        chunk: dict,
+        default_chunk_class: type,
+        base_generation_info: dict | None,
+    ) -> ChatGenerationChunk | None:
+        """Capture ``extra_content`` from a streaming delta.
+
+        Keyed by tool-call id, not by ``index``: the gateway sends ``index:
+        null`` on these deltas, and per-id entries merge across chunks without
+        colliding.
+        """
+        generation_chunk = super()._convert_chunk_to_generation_chunk(
+            chunk, default_chunk_class, base_generation_info
+        )
+        if generation_chunk is None or not isinstance(
+            generation_chunk.message, AIMessageChunk
+        ):
+            return generation_chunk
+
+        # Mirror how the library resolves choices, including the beta stream shape.
+        choices = chunk.get("choices", []) or chunk.get("chunk", {}).get("choices", [])
+        if not choices or not isinstance(choices[0], dict):
+            return generation_chunk
+
+        delta = choices[0].get("delta")
+        if not isinstance(delta, dict):
+            return generation_chunk
+
+        captured = _extra_content_by_tool_call_id(delta.get("tool_calls"))
+        if captured:
+            generation_chunk.message.additional_kwargs[EXTRA_CONTENT_KEY] = captured
+
+        return generation_chunk
 
     def _get_request_payload(
         self,
