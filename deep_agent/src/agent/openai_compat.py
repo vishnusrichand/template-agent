@@ -28,34 +28,45 @@ from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from langchain_openai import ChatOpenAI
 
 # Key used both for the raw field on a tool call and for the stash on
-# ``AIMessage.additional_kwargs`` (where it holds {tool_call_id: extra_content}).
+# ``AIMessage.additional_kwargs``, where it holds {tool_call_id: [extra_content]}.
 EXTRA_CONTENT_KEY = "extra_content"
 
 
-def _extra_content_by_tool_call_id(tool_calls: Any) -> dict[str, Any]:
+def _extra_content_by_tool_call_id(tool_calls: Any) -> dict[str, list[Any]]:
     """Map tool-call ``id`` to its ``extra_content``, for well-formed entries only.
 
     Anything malformed is skipped rather than raised on: this runs inside a
     response-parsing path, where a vendor quirk must never become a crash.
 
+    Each value is a single-element *list*, and that is load-bearing. LangChain
+    merges ``additional_kwargs`` across streaming chunks with ``merge_dicts``,
+    which recurses into nested dicts and **concatenates** strings on key
+    collision. A plain ``{id: blob}`` stash would therefore turn a signature
+    repeated across two deltas into ``"abc" + "abc" == "abcabc"`` — silently
+    corrupting the very bytes this module exists to relay intact. ``merge_dicts``
+    hands list values to ``merge_lists``, which appends entries that carry no
+    integer ``index`` key, so duplicates accumulate harmlessly and the replay
+    takes the first. Do not "simplify" this back to a bare dict.
+
     Args:
         tool_calls: Raw ``tool_calls`` value from a response message or delta.
 
     Returns:
-        Mapping of tool-call id to its extra content. Empty when the input is
-        not a list or no entry carries usable extra content.
+        Mapping of tool-call id to a one-element list holding its extra content.
+        Empty when the input is not a list or no entry carries usable extra
+        content.
     """
     if not isinstance(tool_calls, list):
         return {}
 
-    found: dict[str, Any] = {}
+    found: dict[str, list[Any]] = {}
     for tool_call in tool_calls:
         if not isinstance(tool_call, dict):
             continue
         call_id = tool_call.get("id")
         extra = tool_call.get(EXTRA_CONTENT_KEY)
         if isinstance(call_id, str) and call_id and isinstance(extra, dict) and extra:
-            found[call_id] = extra
+            found[call_id] = [extra]
     return found
 
 
@@ -104,8 +115,9 @@ class ExtraContentChatOpenAI(ChatOpenAI):
         """Capture ``extra_content`` from a streaming delta.
 
         Keyed by tool-call id, not by ``index``: the gateway sends ``index:
-        null`` on these deltas, and per-id entries merge across chunks without
-        colliding.
+        null`` on these deltas. See :func:`_extra_content_by_tool_call_id` for
+        why each value is a list — chunk merging concatenates strings, so the
+        list is what keeps a repeated signature from being doubled.
         """
         generation_chunk = super()._convert_chunk_to_generation_chunk(
             chunk, default_chunk_class, base_generation_info
@@ -160,6 +172,15 @@ class ExtraContentChatOpenAI(ChatOpenAI):
                     stashed.update(captured)
         if not stashed:
             return payload
+
+        # Values are lists so chunk merging appends rather than concatenating
+        # (see _extra_content_by_tool_call_id). Repeats of one tool call carry
+        # the same blob, so the first entry is the one to send.
+        stashed = {
+            call_id: entries[0] if isinstance(entries, list) else entries
+            for call_id, entries in stashed.items()
+            if not isinstance(entries, list) or entries
+        }
 
         for message_dict in messages:
             if (

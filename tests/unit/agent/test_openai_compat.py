@@ -54,7 +54,7 @@ def _tool_call(id_, name="get_weather", extra=None):
 class TestExtraContentByToolCallId:
     def test_maps_id_to_extra_content(self):
         assert _extra_content_by_tool_call_id([_tool_call("call_1", extra=SIG)]) == {
-            "call_1": SIG
+            "call_1": [SIG]
         }
 
     def test_skips_entry_without_id(self):
@@ -85,7 +85,7 @@ class TestCreateChatResultCapture:
             _response([_tool_call("call_1", extra=SIG)])
         )
         message = result.generations[0].message
-        assert message.additional_kwargs[EXTRA_CONTENT_KEY] == {"call_1": SIG}
+        assert message.additional_kwargs[EXTRA_CONTENT_KEY] == {"call_1": [SIG]}
 
     def test_captures_each_of_multiple_tool_calls(self):
         other = {"google": {"thought_signature": "def456"}}
@@ -98,8 +98,8 @@ class TestCreateChatResultCapture:
             )
         )
         assert result.generations[0].message.additional_kwargs[EXTRA_CONTENT_KEY] == {
-            "call_1": SIG,
-            "call_2": other,
+            "call_1": [SIG],
+            "call_2": [other],
         }
 
     def test_no_key_added_when_absent(self):
@@ -137,7 +137,7 @@ def _ai_with_signature(ids_to_sig):
             }
             for id_ in ids_to_sig
         ],
-        additional_kwargs={EXTRA_CONTENT_KEY: dict(ids_to_sig)},
+        additional_kwargs={EXTRA_CONTENT_KEY: {k: [v] for k, v in ids_to_sig.items()}},
     )
 
 
@@ -173,7 +173,7 @@ class TestGetRequestPayloadReplay:
 
     def test_stashed_id_absent_from_payload_is_ignored(self):
         ai = _ai_with_signature({"call_1": SIG})
-        ai.additional_kwargs[EXTRA_CONTENT_KEY]["call_stale"] = SIG
+        ai.additional_kwargs[EXTRA_CONTENT_KEY]["call_stale"] = [SIG]
         payload = self._llm()._get_request_payload(self._conversation(ai))
         assistant = next(m for m in payload["messages"] if m["role"] == "assistant")
         assert [tc["id"] for tc in assistant["tool_calls"]] == ["call_1"]
@@ -236,7 +236,7 @@ class TestStreamingCapture:
             AIMessageChunk,
             None,
         )
-        assert gen.message.additional_kwargs[EXTRA_CONTENT_KEY] == {"call_1": SIG}
+        assert gen.message.additional_kwargs[EXTRA_CONTENT_KEY] == {"call_1": [SIG]}
 
     def test_no_key_added_when_absent(self):
         gen = self._llm()._convert_chunk_to_generation_chunk(
@@ -257,8 +257,8 @@ class TestStreamingCapture:
         )
         merged = first + second
         assert merged.message.additional_kwargs[EXTRA_CONTENT_KEY] == {
-            "call_1": SIG,
-            "call_2": other,
+            "call_1": [SIG],
+            "call_2": [other],
         }
 
     def test_chunk_without_choices_returns_super_result(self):
@@ -268,6 +268,51 @@ class TestStreamingCapture:
             None,
         )
         assert gen is None or EXTRA_CONTENT_KEY not in gen.message.additional_kwargs
+
+    def test_repeated_tool_call_id_across_chunks_does_not_corrupt_signature(self):
+        """A gateway that repeats a tool call's envelope must not double the blob.
+
+        langchain merges additional_kwargs across chunks, and merge_dicts
+        concatenates strings on collision, so a naive {id: blob} stash turns
+        "abc" into "abcabc" — the exact corruption the replay exists to avoid.
+        """
+        llm = self._llm()
+        first = llm._convert_chunk_to_generation_chunk(
+            _delta_chunk([_delta_tool_call("call_1", extra=SIG, index=0)]),
+            AIMessageChunk,
+            None,
+        )
+        second = llm._convert_chunk_to_generation_chunk(
+            _delta_chunk([_delta_tool_call("call_1", extra=SIG, index=0)]),
+            AIMessageChunk,
+            None,
+        )
+        merged = first + second
+
+        payload = llm._get_request_payload([merged.message])
+        assistant = next(m for m in payload["messages"] if m["role"] == "assistant")
+        assert assistant["tool_calls"][0]["extra_content"] == SIG
+
+
+class TestCreateChatResultWithSdkModel:
+    """The non-streaming path always receives an ``openai.BaseModel`` in production."""
+
+    def _llm(self):
+        return ExtraContentChatOpenAI(
+            model="gemini-3.5-flash", api_key="test", base_url="http://x/v1"
+        )
+
+    def test_captures_signature_from_chat_completion_model(self):
+        from openai.types.chat import ChatCompletion
+
+        raw = _response([_tool_call("call_1", extra=SIG)])
+        raw["object"] = "chat.completion"
+        raw["created"] = 0
+        completion = ChatCompletion.model_validate(raw)
+
+        result = self._llm()._create_chat_result(completion)
+        message = result.generations[0].message
+        assert message.additional_kwargs[EXTRA_CONTENT_KEY] == {"call_1": [SIG]}
 
 
 class TestVllmRouteUsesSubclass:
